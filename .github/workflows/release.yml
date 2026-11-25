@@ -90,9 +90,9 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>com.c0p3rn1cus.gatin</string>
             <key>CFBundleVersion</key>
-            <string>0.1.1</string>
+            <string>0.2.0</string>
             <key>CFBundleShortVersionString</key>
-            <string>0.1.1</string>
+            <string>0.2.0</string>
             <key>CFBundleExecutable</key>
             <string>gatin</string>
             <key>CFBundlePackageType</key>

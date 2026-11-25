@@ -12,7 +12,7 @@ mod renderer;
 
 use crate::app::GatinApp;
 use crate::cat::{CANVAS_H, CANVAS_W};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, MAX_SCALE, MIN_SCALE};
 use crate::input::GlobalInput;
 use crate::pet::PetKind;
 use crate::privacy::PrivacyMonitor;
@@ -60,7 +60,7 @@ fn main() -> eframe::Result<()> {
     let mut config = AppConfig::load();
 
     if let Some(scale) = cli.scale {
-        config.scale = scale.clamp(0.5, 2.5);
+        config.scale = scale.clamp(MIN_SCALE, MAX_SCALE);
     }
     if cli.no_keycaps {
         config.show_keycaps = false;
@@ -90,7 +90,8 @@ fn main() -> eframe::Result<()> {
         .with_app_id("gatin")
         .with_title("gatin")
         .with_inner_size([width, height])
-        .with_min_inner_size([CANVAS_W * 0.5, CANVAS_H * 0.5])
+        .with_min_inner_size([CANVAS_W * MIN_SCALE, CANVAS_H * MIN_SCALE])
+        .with_max_inner_size([CANVAS_W * MAX_SCALE, CANVAS_H * MAX_SCALE])
         .with_decorations(false)
         .with_transparent(true)
         .with_has_shadow(false)
