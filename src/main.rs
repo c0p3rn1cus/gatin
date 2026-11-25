@@ -6,6 +6,7 @@ mod config;
 mod demo;
 mod input;
 mod keyboard;
+mod pet;
 mod privacy;
 mod renderer;
 
@@ -13,6 +14,7 @@ use crate::app::GatinApp;
 use crate::cat::{CANVAS_H, CANVAS_W};
 use crate::config::AppConfig;
 use crate::input::GlobalInput;
+use crate::pet::PetKind;
 use crate::privacy::PrivacyMonitor;
 use clap::Parser;
 use egui::{ViewportBuilder, WindowLevel};
@@ -21,7 +23,7 @@ use egui::{ViewportBuilder, WindowLevel};
 #[command(
     name = "gatin",
     version,
-    about = "Gatinho preto desktop pet em Rust (Linux, Windows e macOS)"
+    about = "Pet de desktop em Rust: gatos, cachorro e capivara que digitam com você (Linux, Windows e macOS)"
 )]
 struct Cli {
     /// Inicia no modo demo (digitação, mouse e carinho automáticos)
@@ -44,6 +46,10 @@ struct Cli {
     #[arg(long)]
     click_through: bool,
 
+    /// Escolhe o pet: black-cat, frajola, bengal, tricolor, siames, cachorro
+    #[arg(long, value_enum)]
+    pet: Option<PetKind>,
+
     /// Exibe logs de diagnóstico da detecção de campos de senha (AT-SPI2/UIA/Carbon)
     #[arg(long)]
     debug_privacy: bool,
@@ -64,6 +70,9 @@ fn main() -> eframe::Result<()> {
     }
     if cli.click_through {
         config.click_through = true;
+    }
+    if let Some(pet) = cli.pet {
+        config.pet = pet;
     }
 
     let global_input = GlobalInput::start();

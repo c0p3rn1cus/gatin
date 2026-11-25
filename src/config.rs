@@ -1,3 +1,4 @@
+use crate::pet::PetKind;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,6 +16,8 @@ pub struct AppConfig {
     pub click_through: bool,
     /// Saved window outer position [x, y].
     pub window_pos: Option<[f32; 2]>,
+    /// Which pet is shown (black-cat, tuxedo, bengal, calico, siamese, dog).
+    pub pet: PetKind,
 }
 
 impl Default for AppConfig {
@@ -25,6 +28,7 @@ impl Default for AppConfig {
             show_keycaps: true,
             click_through: false,
             window_pos: None,
+            pet: PetKind::default(),
         }
     }
 }

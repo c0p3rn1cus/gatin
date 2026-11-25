@@ -1,5 +1,6 @@
 use crate::input::InputEvent;
 use crate::keyboard::{KeyId, KeyboardLayout, MouseButton};
+use crate::pet::PetKind;
 use std::collections::{HashMap, HashSet};
 
 /// Logical virtual canvas dimensions (uniformly scaled to window size).
@@ -21,8 +22,16 @@ pub struct PawState {
     pub pos: [f32; 2],
     /// Target paw tip position in virtual canvas coordinates.
     pub target: [f32; 2],
-    /// Vertical lift height (for bouncy key strike arc).
+    /// Spring velocity of the paw tip.
+    pub vel: [f32; 2],
+    /// Quick tap lift (decays fast right after a key strike).
     pub lift: f32,
+    /// Travel arc lift: the paw hops in a parabola when it has to cross the keyboard.
+    pub arc: f32,
+    arc_h: f32,
+    strike_dist: f32,
+    /// True once the paw has landed on the mouse and rides it rigidly.
+    locked_on_mouse: bool,
     /// Seconds remaining before returning from PressingKey to Curled/Resting.
     pub strike_timer: f32,
     /// Seconds since this paw was last active on keyboard.
@@ -41,13 +50,39 @@ impl PawState {
             mode: PawMode::Resting,
             pos: rest_pos,
             target: rest_pos,
+            vel: [0.0, 0.0],
             lift: 0.0,
+            arc: 0.0,
+            arc_h: 0.0,
+            strike_dist: 0.0,
+            locked_on_mouse: false,
             strike_timer: 0.0,
             idle_timer: 10.0,
             curl_blend: 0.0,
             rest_blend: 1.0,
             active_key: None,
         }
+    }
+
+    /// Total vertical lift of the paw tip above the desk.
+    pub fn total_lift(&self) -> f32 {
+        self.lift + self.arc
+    }
+
+    fn strike(&mut self, key: KeyId, key_pos: [f32; 2]) {
+        let dx = key_pos[0] - self.pos[0];
+        let dy = key_pos[1] - self.pos[1];
+        let dist = (dx * dx + dy * dy).sqrt();
+        self.mode = PawMode::PressingKey;
+        self.target = key_pos;
+        self.strike_timer = 0.14;
+        self.idle_timer = 0.0;
+        self.strike_dist = dist;
+        self.arc_h = if dist > 6.0 { (dist * 0.22).clamp(4.0, 15.0) } else { 0.0 };
+        // Short hop when re-tapping (almost) the same spot, so repeats still read as strikes
+        self.lift = if dist > 14.0 { 2.0 } else { 7.0 };
+        self.active_key = Some(key);
+        self.locked_on_mouse = false;
     }
 }
 
@@ -69,14 +104,22 @@ pub struct KeyPopup {
 }
 
 pub struct CatState {
+    /// Which pet (species + coat) is drawn.
+    pub pet: PetKind,
     pub layout: KeyboardLayout,
     pub time: f32,
 
     // Keyboard & mouse physical state
     pub pressed_keys: HashSet<KeyId>,
     pub key_heat: HashMap<KeyId, f32>,
+    /// Physical depress amount per key slot (snappy, unlike the lingering lime `key_heat`).
+    pub key_press: HashMap<KeyId, f32>,
     pub mouse_buttons: HashSet<MouseButton>,
     pub mouse_click_glow: f32,
+    /// Which mouse button was clicked last: -1 left, 0 middle, 1 right.
+    pub mouse_click_side: i8,
+    /// Smooth physical press depth of the mouse buttons [0..1].
+    pub mouse_press: f32,
 
     /// Normalized virtual cursor [0..1, 0..1] across screen.
     pub cursor_norm: [f32; 2],
@@ -88,6 +131,7 @@ pub struct CatState {
     mouse_pad_target: [f32; 2],
     /// Smooth mouse device offset in virtual canvas pixels around base mouse position.
     pub mouse_offset: [f32; 2],
+    mouse_vel: [f32; 2],
     /// Slight mouse body tilt angle when sliding rapidly.
     pub mouse_tilt: f32,
     /// Time since last mouse movement or click.
@@ -97,8 +141,24 @@ pub struct CatState {
     pub gaze: [f32; 2],
     pub lean_x: f32,
     pub head_tilt: f32,
+    /// Springy vertical head/shoulder bounce, kicked by every key strike.
     pub typing_bob: f32,
+    bob_vel: f32,
     pub typing_energy: f32,
+    /// Slow breathing wave [-1..1].
+    pub breath: f32,
+    /// Smooth [0..1] blend of how far the body stretches toward the mouse.
+    pub reach: f32,
+    /// Ear flick amount per ear [viewer's left, viewer's right], 0 = relaxed.
+    pub ear_twitch: [f32; 2],
+    ear_twitch_t: [f32; 2],
+    next_twitch_in: f32,
+    /// Pupil size multiplier (dilates when excited, narrows when blissful).
+    pub pupil: f32,
+    /// Half-lidded sleepy blend after a long quiet period.
+    pub drowsy: f32,
+    quiet_timer: f32,
+    rng: u32,
 
     // Blinking
     pub blink: f32,
@@ -134,24 +194,39 @@ impl CatState {
     pub fn new() -> Self {
         let layout = KeyboardLayout::new_facing_cat();
         Self {
+            pet: PetKind::default(),
             layout,
             time: 0.0,
             pressed_keys: HashSet::new(),
             key_heat: HashMap::new(),
+            key_press: HashMap::new(),
             mouse_buttons: HashSet::new(),
             mouse_click_glow: 0.0,
+            mouse_click_side: -1,
+            mouse_press: 0.0,
             cursor_norm: [0.5, 0.45],
             look_target: [0.0, 0.0],
             abs_cursor_timer: 0.0,
             mouse_pad_target: [0.0, 0.0],
             mouse_offset: [0.0, 0.0],
+            mouse_vel: [0.0, 0.0],
             mouse_tilt: 0.0,
             mouse_idle_timer: 10.0,
             gaze: [0.0, 0.0],
             lean_x: 0.0,
             head_tilt: 0.0,
             typing_bob: 0.0,
+            bob_vel: 0.0,
             typing_energy: 0.0,
+            breath: 0.0,
+            reach: 0.0,
+            ear_twitch: [0.0, 0.0],
+            ear_twitch_t: [0.0, 0.0],
+            next_twitch_in: 4.0,
+            pupil: 1.0,
+            drowsy: 0.0,
+            quiet_timer: 0.0,
+            rng: 0x9E37_79B9,
             blink: 0.0,
             next_blink_in: 3.2,
             blink_phase: 0.0,
@@ -172,11 +247,11 @@ impl CatState {
     }
 
     pub fn left_rest_pos() -> [f32; 2] {
-        [163.0, 232.0]
+        [163.0, 224.5]
     }
 
     pub fn right_rest_pos() -> [f32; 2] {
-        [201.0, 232.0]
+        [201.0, 224.5]
     }
 
     pub fn left_curled_pos() -> [f32; 2] {
@@ -188,7 +263,24 @@ impl CatState {
     }
 
     pub fn mouse_base_pos() -> [f32; 2] {
-        [49.0, 256.0]
+        [51.0, 252.0]
+    }
+
+    /// Center of the cat's head in virtual canvas coordinates (follows lean, bounce and stretch).
+    pub fn head_center(&self) -> [f32; 2] {
+        [
+            182.0 + self.lean_x,
+            108.0 + self.typing_bob - self.reach * 4.0 + self.breath * 0.6 + self.drowsy * 3.0,
+        ]
+    }
+
+    fn rand01(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
     pub fn mouse_current_pos(&self) -> [f32; 2] {
@@ -221,6 +313,7 @@ impl CatState {
         if active && !self.password_mode {
             self.popups.clear();
             self.key_heat.clear();
+            self.key_press.clear();
             self.pressed_keys.clear();
             self.left_paw.active_key = None;
             self.right_paw.active_key = None;
@@ -241,6 +334,7 @@ impl CatState {
         if dist < 0.8 {
             return;
         }
+        self.quiet_timer = 0.0;
         // Extra bonus when reversing direction (classic back-and-forth petting stroke!)
         let reversal_bonus = if dx.abs() > 1.2 && (dx * self.last_pet_dir) < 0.0 {
             0.38
@@ -265,10 +359,9 @@ impl CatState {
     }
 
     fn clamp_mouse_pad(x: f32, y: f32) -> [f32; 2] {
-        // Generous elliptical mousepad area on viewer's left: rx=24px, ry=24px
-        // Stays cleanly inside canvas [25..73] without colliding with the keyboard (x >= 80)
-        const RX: f32 = 23.0;
-        const RY: f32 = 24.0;
+        // Elliptical mousepad area on viewer's left; keeps the mouse clear of the keyboard case
+        const RX: f32 = 21.0;
+        const RY: f32 = 22.0;
         let nx = x / RX;
         let ny = y / RY;
         let len = (nx * nx + ny * ny).sqrt();
@@ -280,6 +373,7 @@ impl CatState {
     }
 
     pub fn handle_event(&mut self, ev: InputEvent) {
+        self.quiet_timer = 0.0;
         match ev {
             InputEvent::KeyDown(key) => {
                 // In password mode: NEVER expose characters, NEVER light up specific keys!
@@ -291,9 +385,12 @@ impl CatState {
                 let first_press = self.pressed_keys.insert(key);
                 let slot = key.physical_slot();
                 self.key_heat.insert(slot, 1.0);
+                self.key_press.insert(slot, 1.0);
 
                 if first_press {
                     self.typing_energy = (self.typing_energy + 0.55).min(1.6);
+                    // Every strike kicks the springy body bounce
+                    self.bob_vel = (self.bob_vel + 70.0).min(130.0);
                     // Rapid typing wakes the cat up from petting smoothly
                     self.pet_hold_timer = (self.pet_hold_timer - 0.35).max(0.0);
 
@@ -317,19 +414,9 @@ impl CatState {
                     };
 
                     if use_left {
-                        self.left_paw.mode = PawMode::PressingKey;
-                        self.left_paw.target = key_pos;
-                        self.left_paw.strike_timer = 0.16;
-                        self.left_paw.idle_timer = 0.0;
-                        self.left_paw.lift = 14.0;
-                        self.left_paw.active_key = Some(key);
+                        self.left_paw.strike(key, key_pos);
                     } else {
-                        self.right_paw.mode = PawMode::PressingKey;
-                        self.right_paw.target = key_pos;
-                        self.right_paw.strike_timer = 0.16;
-                        self.right_paw.idle_timer = 0.0;
-                        self.right_paw.lift = 14.0;
-                        self.right_paw.active_key = Some(key);
+                        self.right_paw.strike(key, key_pos);
                     }
 
                     self.spawn_popup(key, key_pos[0]);
@@ -411,7 +498,17 @@ impl CatState {
             InputEvent::MouseDown(btn) => {
                 self.mouse_buttons.insert(btn);
                 self.mouse_click_glow = 1.0;
+                self.mouse_click_side = match btn {
+                    MouseButton::Left => -1,
+                    MouseButton::Middle => 0,
+                    MouseButton::Right => 1,
+                };
                 self.mouse_idle_timer = 0.0;
+                // Clicks perk an ear up
+                let ear = if self.rand01() < 0.5 { 0 } else { 1 };
+                if self.ear_twitch_t[ear] <= 0.0 {
+                    self.ear_twitch_t[ear] = 0.26;
+                }
             }
             InputEvent::MouseUp(btn) => {
                 self.mouse_buttons.remove(&btn);
@@ -477,8 +574,18 @@ impl CatState {
                 *heat = 1.0;
                 true
             } else {
-                *heat = (*heat - dt * 4.5).max(0.0);
+                // Lime "paw prints" linger on the keys for a moment, like the reference
+                *heat = (*heat - dt * 1.5).max(0.0);
                 *heat > 0.01
+            }
+        });
+        self.key_press.retain(|slot, press| {
+            if pressed_slots.contains(slot) {
+                *press = 1.0;
+                true
+            } else {
+                *press = (*press - dt * 13.0).max(0.0);
+                *press > 0.01
             }
         });
 
@@ -486,8 +593,10 @@ impl CatState {
         if !self.mouse_buttons.is_empty() {
             self.mouse_click_glow = 1.0;
         } else {
-            self.mouse_click_glow = (self.mouse_click_glow - dt * 5.0).max(0.0);
+            self.mouse_click_glow = (self.mouse_click_glow - dt * 4.0).max(0.0);
         }
+        let press_target = if self.mouse_buttons.is_empty() { 0.0 } else { 1.0 };
+        self.mouse_press += (press_target - self.mouse_press) * (1.0 - (-dt * 32.0).exp());
 
         // Mouse sliding offset around base position: super snappy & expressive!
         if self.mouse_idle_timer > 1.8 {
@@ -496,15 +605,20 @@ impl CatState {
             self.mouse_pad_target[0] *= 1.0 - recenter;
             self.mouse_pad_target[1] *= 1.0 - recenter;
         }
-        let mouse_lerp = 1.0 - (-dt * 28.0).exp();
-        let prev_mx = self.mouse_offset[0];
-        self.mouse_offset[0] += (self.mouse_pad_target[0] - self.mouse_offset[0]) * mouse_lerp;
-        self.mouse_offset[1] += (self.mouse_pad_target[1] - self.mouse_offset[1]) * mouse_lerp;
+        // Slightly underdamped spring: the mouse glides with weight and settles with a tiny overshoot
+        spring_step(
+            &mut self.mouse_offset,
+            &mut self.mouse_vel,
+            self.mouse_pad_target,
+            34.0,
+            0.78,
+            dt,
+        );
 
-        // Subtle dynamic tilt of the white mouse as the cat slides it left/right
-        let vx = (self.mouse_offset[0] - prev_mx) / dt;
-        let target_mouse_tilt = (vx * 0.0018 + self.mouse_offset[0] * 0.006).clamp(-0.22, 0.22);
-        self.mouse_tilt += (target_mouse_tilt - self.mouse_tilt) * (1.0 - (-dt * 16.0).exp());
+        // The mouse yaws into the direction it is being dragged
+        let target_mouse_tilt =
+            (self.mouse_vel[0] * 0.0016 + self.mouse_offset[0] * 0.007).clamp(-0.3, 0.3);
+        self.mouse_tilt += (target_mouse_tilt - self.mouse_tilt) * (1.0 - (-dt * 14.0).exp());
 
         // Petting rub decay & level smoothing
         self.pet_rub_energy = (self.pet_rub_energy - dt * 1.35).max(0.0);
@@ -520,9 +634,9 @@ impl CatState {
         self.next_blink_in -= dt;
         if self.next_blink_in <= 0.0 && self.blink_phase <= 0.0 {
             self.blink_phase = 0.15;
-            // Pseudo-random interval between 2.8s and 6.2s
-            let pseudo = ((self.time * 13.37).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-            self.next_blink_in = 2.8 + pseudo * 3.4;
+            // Mostly 2.5–6.5s apart, with an occasional quick double blink
+            let r = self.rand01();
+            self.next_blink_in = if r < 0.18 { 0.32 } else { 2.5 + self.rand01() * 4.0 };
         }
         if self.blink_phase > 0.0 {
             self.blink_phase = (self.blink_phase - dt).max(0.0);
@@ -532,8 +646,37 @@ impl CatState {
             self.blink = 0.0;
         }
 
+        // Breathing, ear flicks, pupils, drowsiness
+        self.breath = (self.time * 1.7).sin();
+        self.quiet_timer += dt;
+        let drowsy_target = if self.quiet_timer > 45.0 && !self.password_mode { 1.0 } else { 0.0 };
+        let drowsy_rate = if drowsy_target > 0.5 { 0.8 } else { 9.0 };
+        self.drowsy += (drowsy_target - self.drowsy) * (1.0 - (-dt * drowsy_rate).exp());
+
+        self.next_twitch_in -= dt;
+        if self.next_twitch_in <= 0.0 {
+            let ear = if self.rand01() < 0.5 { 0 } else { 1 };
+            self.ear_twitch_t[ear] = 0.26;
+            self.next_twitch_in = 3.0 + self.rand01() * 7.0;
+        }
+        for i in 0..2 {
+            if self.ear_twitch_t[i] > 0.0 {
+                self.ear_twitch_t[i] = (self.ear_twitch_t[i] - dt).max(0.0);
+                let t = 1.0 - self.ear_twitch_t[i] / 0.26;
+                // Quick double flick
+                self.ear_twitch[i] = (t * std::f32::consts::TAU).sin().abs() * (1.0 - t * 0.5);
+            } else {
+                self.ear_twitch[i] = 0.0;
+            }
+        }
+
+        let excite = self.typing_energy.min(1.0).max(self.mouse_click_glow);
+        let pupil_target = 1.0 + excite * 0.2 - self.pet_level * 0.1 + self.drowsy * 0.12;
+        self.pupil += (pupil_target - self.pupil) * (1.0 - (-dt * 7.0).exp());
+
         // Tail animation (gentle happy wag faster when petted or typing)
-        let tail_speed = 2.1 + self.pet_level * 2.2 + self.typing_energy.min(1.0) * 1.4;
+        let tail_speed = (2.1 + self.pet_level * 2.2 + self.typing_energy.min(1.0) * 1.4)
+            * (1.0 - self.drowsy * 0.55);
         self.tail_phase += dt * tail_speed;
 
         // Privacy cover-eyes blend (smoothly raises both paws over the eyes!)
@@ -572,7 +715,7 @@ impl CatState {
         let target_lean_x = if self.password_mode {
             (self.time * 18.0).sin() * 2.5 * self.shy_wiggle
         } else if self.left_paw.mode == PawMode::OnMouse {
-            -14.0 + self.mouse_offset[0] * 0.45 + self.pet_lean * 6.0
+            -17.0 + self.mouse_offset[0] * 0.4 + self.pet_lean * 6.0
         } else if self.pet_level > 0.1 {
             self.pet_lean * 8.0
         } else if self.typing_energy > 0.15 {
@@ -585,7 +728,7 @@ impl CatState {
             {
                 -4.0
             } else {
-                (self.time * 12.0).sin() * 2.0 * self.typing_energy.min(1.0)
+                0.0
             }
         } else {
             0.0
@@ -594,6 +737,13 @@ impl CatState {
         let lean_lerp = 1.0 - (-dt * 8.0).exp();
         self.lean_x += (target_lean_x - self.lean_x) * lean_lerp;
 
+        let reach_target = if self.left_paw.mode == PawMode::OnMouse && !self.password_mode {
+            1.0
+        } else {
+            0.0
+        };
+        self.reach += (reach_target - self.reach) * (1.0 - (-dt * 7.0).exp());
+
         let target_tilt = if self.password_mode {
             -0.06 + (self.time * 16.0).sin() * 0.05 * self.shy_wiggle
         } else {
@@ -601,13 +751,14 @@ impl CatState {
         };
         self.head_tilt += (target_tilt - self.head_tilt) * lean_lerp;
 
-        // Subtle head bob during energetic typing
-        let target_bob = if self.typing_energy > 0.1 {
-            (self.time * 22.0).sin().abs() * 2.8 * self.typing_energy.min(1.0)
-        } else {
-            (self.time * 1.8).sin() * 0.9
-        };
-        self.typing_bob += (target_bob - self.typing_bob) * (1.0 - (-dt * 14.0).exp());
+        // Springy bounce: each key strike dips the head/shoulders, then it wobbles back
+        {
+            let mut p = [self.typing_bob, 0.0];
+            let mut v = [self.bob_vel, 0.0];
+            spring_step(&mut p, &mut v, [0.0, 0.0], 27.0, 0.42, dt);
+            self.typing_bob = p[0].clamp(-4.0, 5.0);
+            self.bob_vel = v[0];
+        }
 
         // Gaze tracking: follow the mouse cursor tightly! Only glance down at keys during heavy typing when mouse is idle.
         let (target_gx, target_gy) = if self.typing_energy > 0.55 && self.mouse_idle_timer > 0.65 {
@@ -652,7 +803,7 @@ impl CatState {
                 if paw.strike_timer <= 0.0 {
                     if let Some(mpos) = mouse_target {
                         paw.mode = PawMode::OnMouse;
-                        paw.target = [mpos[0] + 4.0, mpos[1] - 6.0];
+                        paw.target = [mpos[0] + 1.5, mpos[1] - 8.0];
                     } else if typing_energy > 0.25 {
                         paw.mode = PawMode::Curled;
                         paw.target = curled_pos;
@@ -664,7 +815,7 @@ impl CatState {
             }
         } else if let Some(mpos) = mouse_target {
             paw.mode = PawMode::OnMouse;
-            paw.target = [mpos[0] + 4.0, mpos[1] - 6.0];
+            paw.target = [mpos[0] + 1.5, mpos[1] - 8.0];
         } else if paw.mode == PawMode::Curled {
             if typing_energy < 0.15 && paw.idle_timer > 0.55 {
                 paw.mode = PawMode::Resting;
@@ -677,23 +828,70 @@ impl CatState {
             paw.target = rest_pos;
         }
 
-        // Fast snappy spring for typing strikes and active mouse movement!
-        let speed = match paw.mode {
-            PawMode::PressingKey => 34.0,
-            PawMode::Curled => 22.0,
-            PawMode::OnMouse => 32.0,
-            PawMode::Resting => 10.0,
+        if paw.mode != PawMode::OnMouse {
+            paw.locked_on_mouse = false;
+        }
+
+        if paw.locked_on_mouse {
+            // Riding the mouse: glued to it, no springy lag
+            paw.vel = [0.0, 0.0];
+            paw.pos = paw.target;
+        } else {
+            // (angular frequency, damping ratio): strikes are fast with a hint of overshoot
+            let (omega, zeta) = match paw.mode {
+                PawMode::PressingKey => (40.0, 0.74),
+                PawMode::Curled => (21.0, 0.7),
+                PawMode::OnMouse => (30.0, 0.9),
+                PawMode::Resting => (13.0, 0.85),
+            };
+            spring_step(&mut paw.pos, &mut paw.vel, paw.target, omega, zeta, dt);
+
+            if paw.mode == PawMode::OnMouse {
+                let dx = paw.target[0] - paw.pos[0];
+                let dy = paw.target[1] - paw.pos[1];
+                if dx * dx + dy * dy < 9.0 {
+                    paw.locked_on_mouse = true;
+                }
+            }
+        }
+
+        // Tap lift decays fast; the travel arc follows how far along the strike the paw is
+        paw.lift *= (-dt * 26.0).exp();
+        let arc_target = if paw.mode == PawMode::PressingKey && paw.strike_dist > 6.0 {
+            let dx = paw.target[0] - paw.pos[0];
+            let dy = paw.target[1] - paw.pos[1];
+            let p = ((dx * dx + dy * dy).sqrt() / paw.strike_dist).clamp(0.0, 1.0);
+            paw.arc_h * 4.0 * p * (1.0 - p)
+        } else {
+            0.0
         };
-        let alpha = 1.0 - (-dt * speed).exp();
-        paw.pos[0] += (paw.target[0] - paw.pos[0]) * alpha;
-        paw.pos[1] += (paw.target[1] - paw.pos[1]) * alpha;
-        paw.lift *= 1.0 - (dt * 24.0).min(1.0);
+        paw.arc += (arc_target - paw.arc) * (1.0 - (-dt * 45.0).exp());
 
         let target_curl = if paw.mode == PawMode::Curled { 1.0 } else { 0.0 };
         let target_rest = if paw.mode == PawMode::Resting { 1.0 } else { 0.0 };
         let blend_alpha = 1.0 - (-dt * 12.0).exp();
         paw.curl_blend += (target_curl - paw.curl_blend) * blend_alpha;
         paw.rest_blend += (target_rest - paw.rest_blend) * blend_alpha;
+    }
+}
+
+/// Damped spring integrator (sub-stepped so stiff springs stay stable at low frame rates).
+fn spring_step(
+    pos: &mut [f32; 2],
+    vel: &mut [f32; 2],
+    target: [f32; 2],
+    omega: f32,
+    zeta: f32,
+    dt: f32,
+) {
+    let steps = (dt / 0.004).ceil().max(1.0) as usize;
+    let h = dt / steps as f32;
+    for _ in 0..steps {
+        for i in 0..2 {
+            let acc = omega * omega * (target[i] - pos[i]) - 2.0 * zeta * omega * vel[i];
+            vel[i] += acc * h;
+            pos[i] += vel[i] * h;
+        }
     }
 }
 

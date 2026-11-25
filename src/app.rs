@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::demo::DemoDriver;
 use crate::input::{GlobalInput, InputEvent, egui_key_to_key_id};
 use crate::keyboard::MouseButton;
+use crate::pet::PetKind;
 use crate::privacy::PrivacyMonitor;
 use crate::renderer::{CanvasTransform, is_on_cat_body, is_on_cat_head, render_scene};
 use egui::{CentralPanel, Context, CursorIcon, Frame, Pos2, Sense, ViewportCommand, WindowLevel};
@@ -21,6 +22,10 @@ pub struct GatinApp {
     last_saved_pos: Option<[f32; 2]>,
     config_dirty: bool,
     last_save: Instant,
+    /// Seconds the pet-picker bar stays visible after switching pets.
+    pet_toast: f32,
+    /// Smooth fade of the pet-picker bar.
+    picker_alpha: f32,
 }
 
 impl GatinApp {
@@ -30,8 +35,10 @@ impl GatinApp {
         input: GlobalInput,
         privacy: PrivacyMonitor,
     ) -> Self {
+        let mut cat = CatState::new();
+        cat.pet = config.pet;
         Self {
-            cat: CatState::new(),
+            cat,
             input,
             privacy,
             manual_privacy: false,
@@ -43,6 +50,109 @@ impl GatinApp {
             last_hover_pos: None,
             config_dirty: false,
             last_save: Instant::now(),
+            // Show the picker for a moment on launch so it is discoverable
+            pet_toast: 3.5,
+            picker_alpha: 0.0,
+        }
+    }
+
+    fn set_pet(&mut self, pet: PetKind) {
+        if self.cat.pet != pet {
+            self.cat.pet = pet;
+            self.config.pet = pet;
+            self.config_dirty = true;
+        }
+        self.pet_toast = 1.8;
+    }
+
+    /// Hover bar above the pet: ‹ name › plus one dot per pet. Click an arrow or a dot to switch.
+    fn pet_picker_bar(&mut self, ui: &mut egui::Ui, tf: &CanvasTransform, alpha: f32) {
+        use egui::{Align2, Color32, FontId, Rect, Stroke, vec2};
+        let a = |v: f32| (v * alpha).round().clamp(0.0, 255.0) as u8;
+        let interactive = alpha > 0.5;
+        let sense = if interactive { Sense::click() } else { Sense::hover() };
+        let bar_y = 22.0;
+        let mut chosen: Option<PetKind> = None;
+
+        // Name pill
+        let pill = Rect::from_center_size(tf.pt(180.0, bar_y), vec2(tf.s(104.0), tf.s(22.0)));
+        let painter = ui.painter().clone();
+        painter.rect_filled(pill, tf.s(11.0), Color32::from_rgba_unmultiplied(22, 22, 26, a(215.0)));
+        painter.text(
+            pill.center(),
+            Align2::CENTER_CENTER,
+            self.cat.pet.label(),
+            FontId::proportional(tf.s(12.5)),
+            Color32::from_rgba_unmultiplied(244, 244, 240, a(255.0)),
+        );
+
+        // Previous / next arrows
+        for (x, dir) in [(113.0_f32, -1.0_f32), (247.0, 1.0)] {
+            let center = tf.pt(x, bar_y);
+            let rect = Rect::from_center_size(center, vec2(tf.s(26.0), tf.s(26.0)));
+            let resp = ui.allocate_rect(rect, sense);
+            let hot = interactive && resp.hovered();
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+            let bg = if hot {
+                Color32::from_rgba_unmultiplied(206, 240, 74, a(255.0))
+            } else {
+                Color32::from_rgba_unmultiplied(22, 22, 26, a(215.0))
+            };
+            let fg = if hot {
+                Color32::from_rgba_unmultiplied(22, 22, 26, a(255.0))
+            } else {
+                Color32::from_rgba_unmultiplied(244, 244, 240, a(255.0))
+            };
+            painter.circle_filled(center, tf.s(11.0), bg);
+            let u = tf.s(1.0);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    center + vec2(dir * 4.2 * u, 0.0),
+                    center + vec2(-dir * 2.6 * u, -4.6 * u),
+                    center + vec2(-dir * 2.6 * u, 4.6 * u),
+                ],
+                fg,
+                Stroke::NONE,
+            ));
+            if interactive && resp.clicked() {
+                chosen = Some(if dir < 0.0 { self.cat.pet.prev() } else { self.cat.pet.next() });
+            }
+        }
+
+        // One coat-colored dot per pet
+        let count = PetKind::VISIBLE.len() as f32;
+        for (i, kind) in PetKind::VISIBLE.into_iter().enumerate() {
+            let x = 180.0 + (i as f32 - (count - 1.0) * 0.5) * 15.0;
+            let center = tf.pt(x, bar_y + 20.0);
+            let rect = Rect::from_center_size(center, vec2(tf.s(14.0), tf.s(14.0)));
+            let resp = ui.allocate_rect(rect, sense).on_hover_text(kind.label());
+            let selected = kind == self.cat.pet;
+            let hot = interactive && resp.hovered();
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+            let [c0, c1] = kind.swatch();
+            let r = tf.s(if selected || hot { 5.4 } else { 4.2 });
+            let fade = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a(255.0));
+            painter.circle_filled(center, r + tf.s(1.4), Color32::from_rgba_unmultiplied(22, 22, 26, a(215.0)));
+            painter.circle_filled(center, r, fade(c0));
+            painter.circle_filled(center, r * 0.45, fade(c1));
+            if selected {
+                painter.circle_stroke(
+                    center,
+                    r + tf.s(2.2),
+                    Stroke::new(tf.s(1.4), Color32::from_rgba_unmultiplied(206, 240, 74, a(255.0))),
+                );
+            }
+            if interactive && resp.clicked() {
+                chosen = Some(kind);
+            }
+        }
+
+        if let Some(kind) = chosen {
+            self.set_pet(kind);
         }
     }
 
@@ -206,8 +316,9 @@ impl eframe::App for GatinApp {
                     }
 
                     // Always aim the cat's eyes directly at the cursor when hovering the window!
-                    let eye_cx = 182.0 + self.cat.lean_x;
-                    let eye_cy = 104.0 + self.cat.typing_bob;
+                    let head = self.cat.head_center();
+                    let eye_cx = head[0];
+                    let eye_cy = head[1] - 4.0;
                     let ldx = canvas_pt[0] - eye_cx;
                     let ldy = canvas_pt[1] - eye_cy;
                     let ldist = (ldx * ldx + ldy * ldy).sqrt();
@@ -262,10 +373,45 @@ impl eframe::App for GatinApp {
                 // Paint the cat, desk, keyboard, mouse, paws, and floating keycaps
                 render_scene(ui.painter(), rect, &self.cat, self.config.show_keycaps);
 
+                // Pet picker bar: fades in while the pointer is over the window (or right after a switch)
+                let pointer_inside = ctx
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|p| rect.contains(p));
+                self.pet_toast = (self.pet_toast - dt).max(0.0);
+                let bar_target = if (pointer_inside && !self.config.click_through)
+                    || self.pet_toast > 0.0
+                {
+                    1.0
+                } else {
+                    0.0
+                };
+                self.picker_alpha += (bar_target - self.picker_alpha) * (1.0 - (-dt * 12.0).exp());
+                if self.picker_alpha > 0.02 {
+                    self.pet_picker_bar(ui, &tf, self.picker_alpha);
+                }
+
                 // Right-click context menu
                 response.context_menu(|ui| {
                     ui.set_min_width(210.0);
                     ui.label(egui::RichText::new("Gatin").strong());
+                    ui.separator();
+                    ui.label("Pet:");
+                    for kind in PetKind::VISIBLE {
+                        ui.horizontal(|ui| {
+                            let [c0, c1] = kind.swatch();
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 6.0, c0);
+                            ui.painter().circle_filled(dot.center(), 2.8, c1);
+                            if ui
+                                .selectable_label(self.cat.pet == kind, kind.label())
+                                .clicked()
+                            {
+                                self.set_pet(kind);
+                            }
+                        });
+                    }
+                    ui.separator();
                     ui.small(format!("Input: {}", self.input.status.backend));
                     ui.small(format!("Privacidade: {}", self.privacy.backend));
                     if let Some(hint) = &self.input.status.hint {
