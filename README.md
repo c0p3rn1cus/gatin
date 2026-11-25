@@ -75,12 +75,17 @@ windowrule = no_blur on, match:class ^(gatin)$
 ```
 
 ### Windows
-Funciona direto usando hooks nativos Win32 (`WH_KEYBOARD_LL` e `WH_MOUSE_LL`), sem precisar de permissões especiais.
+Funciona direto usando a API nativa **Windows Raw Input** (`RegisterRawInputDevices` com `RIDEV_INPUTSINK`), sem precisar de permissões de administrador ou hooks globais de sistema.
 
 ```powershell
 cargo build --release
 .\target\release\gatin.exe
 ```
+
+> **Nota sobre Windows Defender / SmartScreen:** como os binários das Releases ainda não possuem assinatura digital paga (*Code Signing*), o Windows pode exibir um aviso de editor desconhecido na primeira execução. O projeto é 100% open-source e compilado via GitHub Actions — se preferir, basta compilar localmente com `cargo build --release`.
+
+#### Iniciar automaticamente no Windows
+Pressione `Win + R`, digite `shell:startup`, dê Enter e coloque um **atalho** do `gatin.exe` nessa pasta (ou registre em `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`).
 
 ### macOS (Apple Silicon & Intel)
 Usa `CoreGraphics` (`CGEventTap` em modo *listen-only*).

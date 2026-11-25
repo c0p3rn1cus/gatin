@@ -1,34 +1,47 @@
 use super::{InputEvent, InputStatus};
 use crate::keyboard::{KeyId, MouseButton};
 use std::ffi::c_void;
-use std::sync::mpsc::Sender;
+use std::mem::{MaybeUninit, size_of};
 use std::sync::OnceLock;
+use std::sync::mpsc::Sender;
 
-type Hhook = *mut c_void;
-type Hinstance = *mut c_void;
 type Hwnd = *mut c_void;
+type Hinstance = *mut c_void;
+type Hrawinput = *mut c_void;
 type Wparam = usize;
 type Lparam = isize;
 type Lresult = isize;
-type HookProc = unsafe extern "system" fn(i32, Wparam, Lparam) -> Lresult;
+type WndProc = unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam) -> Lresult;
 
-const WH_KEYBOARD_LL: i32 = 13;
-const WH_MOUSE_LL: i32 = 14;
+const HWND_MESSAGE: Hwnd = (-3isize) as Hwnd;
+const WM_INPUT: u32 = 0x00FF;
+
+const RID_INPUT: u32 = 0x1000_0003;
+const RIDEV_INPUTSINK: u32 = 0x0000_0100;
+
+const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
+const HID_USAGE_GENERIC_KEYBOARD: u16 = 0x06;
+
+const RIM_TYPEMOUSE: u32 = 0;
+const RIM_TYPEKEYBOARD: u32 = 1;
+
+const RI_KEY_BREAK: u16 = 0x0001;
+const RI_KEY_E0: u16 = 0x0002;
+
+const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+const RI_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+const RI_MOUSE_MIDDLE_BUTTON_UP: u16 = 0x0020;
+
 const SM_CXSCREEN: i32 = 0;
 const SM_CYSCREEN: i32 = 1;
-
-const WM_KEYDOWN: usize = 0x0100;
-const WM_KEYUP: usize = 0x0101;
-const WM_SYSKEYDOWN: usize = 0x0104;
-const WM_SYSKEYUP: usize = 0x0105;
-
-const WM_MOUSEMOVE: usize = 0x0200;
-const WM_LBUTTONDOWN: usize = 0x0201;
-const WM_LBUTTONUP: usize = 0x0202;
-const WM_RBUTTONDOWN: usize = 0x0204;
-const WM_RBUTTONUP: usize = 0x0205;
-const WM_MBUTTONDOWN: usize = 0x0207;
-const WM_MBUTTONUP: usize = 0x0208;
+const SM_XVIRTUALSCREEN: i32 = 76;
+const SM_YVIRTUALSCREEN: i32 = 77;
+const SM_CXVIRTUALSCREEN: i32 = 78;
+const SM_CYVIRTUALSCREEN: i32 = 79;
 
 #[repr(C)]
 struct Point {
@@ -47,29 +60,88 @@ struct Msg {
 }
 
 #[repr(C)]
-struct KbdLlHookStruct {
-    vk_code: u32,
-    scan_code: u32,
-    flags: u32,
-    time: u32,
-    extra_info: usize,
+struct WndClassW {
+    style: u32,
+    lpfn_wnd_proc: WndProc,
+    cb_cls_extra: i32,
+    cb_wnd_extra: i32,
+    h_instance: Hinstance,
+    h_icon: *mut c_void,
+    h_cursor: *mut c_void,
+    hbr_background: *mut c_void,
+    lpsz_menu_name: *const u16,
+    lpsz_class_name: *const u16,
 }
 
 #[repr(C)]
-struct MsLlHookStruct {
-    pt: Point,
-    mouse_data: u32,
+struct RawInputDevice {
+    usage_page: u16,
+    usage: u16,
     flags: u32,
-    time: u32,
-    extra_info: usize,
+    hwnd_target: Hwnd,
+}
+
+#[repr(C)]
+struct RawInputHeader {
+    dw_type: u32,
+    dw_size: u32,
+    h_device: *mut c_void,
+    w_param: Wparam,
+}
+
+#[repr(C)]
+struct RawMouse {
+    us_flags: u16,
+    _pad: u16,
+    us_button_flags: u16,
+    us_button_data: u16,
+    ul_raw_buttons: u32,
+    last_x: i32,
+    last_y: i32,
+    ul_extra_information: u32,
+}
+
+#[repr(C)]
+struct RawKeyboard {
+    make_code: u16,
+    flags: u16,
+    reserved: u16,
+    vkey: u16,
+    message: u32,
+    extra_information: u32,
 }
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn SetWindowsHookExW(id_hook: i32, lpfn: HookProc, hmod: Hinstance, thread_id: u32) -> Hhook;
-    fn CallNextHookEx(hhk: Hhook, ncode: i32, wparam: Wparam, lparam: Lparam) -> Lresult;
-    fn UnhookWindowsHookEx(hhk: Hhook) -> i32;
+    fn RegisterClassW(wc: *const WndClassW) -> u16;
+    fn CreateWindowExW(
+        ex_style: u32,
+        class_name: *const u16,
+        window_name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        parent: Hwnd,
+        menu: *mut c_void,
+        instance: Hinstance,
+        param: *mut c_void,
+    ) -> Hwnd;
+    fn DestroyWindow(hwnd: Hwnd) -> i32;
+    fn DefWindowProcW(hwnd: Hwnd, msg: u32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn GetMessageW(lpmsg: *mut Msg, hwnd: Hwnd, min: u32, max: u32) -> i32;
+    fn TranslateMessage(lpmsg: *const Msg) -> i32;
+    fn DispatchMessageW(lpmsg: *const Msg) -> Lresult;
+    fn RegisterRawInputDevices(devices: *const RawInputDevice, num_devices: u32, size: u32) -> i32;
+    fn GetRawInputData(
+        hrawinput: Hrawinput,
+        ui_command: u32,
+        data: *mut c_void,
+        size: *mut u32,
+        header_size: u32,
+    ) -> u32;
+    fn GetCursorPos(pt: *mut Point) -> i32;
     fn GetSystemMetrics(index: i32) -> i32;
 }
 
@@ -80,64 +152,126 @@ unsafe extern "system" {
 
 static GLOBAL_TX: OnceLock<Sender<InputEvent>> = OnceLock::new();
 
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
-    if code >= 0 && lparam != 0 {
-        let info = unsafe { &*(lparam as *const KbdLlHookStruct) };
-        if let Some(key) = vk_to_key_id(info.vk_code) {
-            if let Some(tx) = GLOBAL_TX.get() {
-                match wparam {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => {
-                        let _ = tx.send(InputEvent::KeyDown(key));
-                    }
-                    WM_KEYUP | WM_SYSKEYUP => {
-                        let _ = tx.send(InputEvent::KeyUp(key));
-                    }
-                    _ => {}
-                }
+unsafe fn handle_raw_input(lparam: Lparam) {
+    let Some(tx) = GLOBAL_TX.get() else {
+        return;
+    };
+
+    let hraw = lparam as Hrawinput;
+    let header_size = size_of::<RawInputHeader>() as u32;
+    let mut size: u32 = 0;
+
+    let query = unsafe {
+        GetRawInputData(
+            hraw,
+            RID_INPUT,
+            std::ptr::null_mut(),
+            &mut size,
+            header_size,
+        )
+    };
+    if query == u32::MAX || size < header_size {
+        return;
+    }
+
+    let mut stack_buf = [0u64; 16];
+    let mut heap_buf: Vec<u64>;
+    let ptr: *mut c_void = if (size as usize) <= size_of::<[u64; 16]>() {
+        stack_buf.as_mut_ptr() as *mut c_void
+    } else {
+        heap_buf = vec![0u64; (size as usize).div_ceil(size_of::<u64>())];
+        heap_buf.as_mut_ptr() as *mut c_void
+    };
+
+    let copied = unsafe { GetRawInputData(hraw, RID_INPUT, ptr, &mut size, header_size) };
+    if copied == u32::MAX || (copied as usize) < size_of::<RawInputHeader>() {
+        return;
+    }
+
+    let header = unsafe { &*(ptr as *const RawInputHeader) };
+    let data_ptr = unsafe { (ptr as *const u8).add(size_of::<RawInputHeader>()) };
+
+    match header.dw_type {
+        RIM_TYPEKEYBOARD => {
+            if (copied as usize) < size_of::<RawInputHeader>() + size_of::<RawKeyboard>() {
+                return;
+            }
+            let kbd = unsafe { &*(data_ptr as *const RawKeyboard) };
+            // 0xFF is Windows' sentinel for virtual/discarded prefix keys (e.g. PrintScreen)
+            if kbd.vkey == 0xFF {
+                return;
+            }
+            if let Some(key) = raw_key_to_key_id(kbd.vkey, kbd.make_code, kbd.flags) {
+                let is_up = (kbd.flags & RI_KEY_BREAK) != 0;
+                let _ = tx.send(if is_up {
+                    InputEvent::KeyUp(key)
+                } else {
+                    InputEvent::KeyDown(key)
+                });
             }
         }
-    }
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
-}
+        RIM_TYPEMOUSE => {
+            if (copied as usize) < size_of::<RawInputHeader>() + size_of::<RawMouse>() {
+                return;
+            }
+            let mouse = unsafe { &*(data_ptr as *const RawMouse) };
 
-unsafe extern "system" fn mouse_proc(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
-    if code >= 0 && lparam != 0 {
-        let info = unsafe { &*(lparam as *const MsLlHookStruct) };
-        if let Some(tx) = GLOBAL_TX.get() {
-            match wparam {
-                WM_MOUSEMOVE => {
-                    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as f32;
-                    let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as f32;
+            if mouse.last_x != 0 || mouse.last_y != 0 {
+                let mut pt = Point { x: 0, y: 0 };
+                if unsafe { GetCursorPos(&mut pt) } != 0 {
+                    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+                    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+                    let mut vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+                    let mut vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+                    if vw <= 0 || vh <= 0 {
+                        vw = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1);
+                        vh = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1);
+                    }
+                    let norm_x = ((pt.x - vx) as f32 / vw as f32).clamp(0.0, 1.0);
+                    let norm_y = ((pt.y - vy) as f32 / vh as f32).clamp(0.0, 1.0);
                     let _ = tx.send(InputEvent::MouseMove {
-                        norm_x: (info.pt.x as f32 / sw).clamp(0.0, 1.0),
-                        norm_y: (info.pt.y as f32 / sh).clamp(0.0, 1.0),
-                        screen_px: Some([info.pt.x as f32, info.pt.y as f32]),
+                        norm_x,
+                        norm_y,
+                        screen_px: Some([pt.x as f32, pt.y as f32]),
                         look_dir: None,
                     });
                 }
-                WM_LBUTTONDOWN => {
-                    let _ = tx.send(InputEvent::MouseDown(MouseButton::Left));
-                }
-                WM_LBUTTONUP => {
-                    let _ = tx.send(InputEvent::MouseUp(MouseButton::Left));
-                }
-                WM_RBUTTONDOWN => {
-                    let _ = tx.send(InputEvent::MouseDown(MouseButton::Right));
-                }
-                WM_RBUTTONUP => {
-                    let _ = tx.send(InputEvent::MouseUp(MouseButton::Right));
-                }
-                WM_MBUTTONDOWN => {
-                    let _ = tx.send(InputEvent::MouseDown(MouseButton::Middle));
-                }
-                WM_MBUTTONUP => {
-                    let _ = tx.send(InputEvent::MouseUp(MouseButton::Middle));
-                }
-                _ => {}
+            }
+
+            let bf = mouse.us_button_flags;
+            if (bf & RI_MOUSE_LEFT_BUTTON_DOWN) != 0 {
+                let _ = tx.send(InputEvent::MouseDown(MouseButton::Left));
+            }
+            if (bf & RI_MOUSE_LEFT_BUTTON_UP) != 0 {
+                let _ = tx.send(InputEvent::MouseUp(MouseButton::Left));
+            }
+            if (bf & RI_MOUSE_RIGHT_BUTTON_DOWN) != 0 {
+                let _ = tx.send(InputEvent::MouseDown(MouseButton::Right));
+            }
+            if (bf & RI_MOUSE_RIGHT_BUTTON_UP) != 0 {
+                let _ = tx.send(InputEvent::MouseUp(MouseButton::Right));
+            }
+            if (bf & RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0 {
+                let _ = tx.send(InputEvent::MouseDown(MouseButton::Middle));
+            }
+            if (bf & RI_MOUSE_MIDDLE_BUTTON_UP) != 0 {
+                let _ = tx.send(InputEvent::MouseUp(MouseButton::Middle));
             }
         }
+        _ => {}
     }
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+unsafe extern "system" fn raw_input_wnd_proc(
+    hwnd: Hwnd,
+    msg: u32,
+    wparam: Wparam,
+    lparam: Lparam,
+) -> Lresult {
+    if msg == WM_INPUT {
+        unsafe { handle_raw_input(lparam) };
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
 pub fn start(tx: Sender<InputEvent>) -> InputStatus {
@@ -145,37 +279,92 @@ pub fn start(tx: Sender<InputEvent>) -> InputStatus {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()
-        .name("gatin-win32-hooks".into())
+        .name("gatin-win32-rawinput".into())
         .spawn(move || {
             let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
-            let kbd_hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0) };
-            let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0) };
-            let ok = !kbd_hook.is_null() && !mouse_hook.is_null();
-            let _ = ready_tx.send(ok);
-            if !ok {
-                if !kbd_hook.is_null() {
-                    unsafe { UnhookWindowsHookEx(kbd_hook) };
-                }
-                if !mouse_hook.is_null() {
-                    unsafe { UnhookWindowsHookEx(mouse_hook) };
-                }
+            let class_name: Vec<u16> = "GatinRawInputSink\0".encode_utf16().collect();
+
+            let wc = WndClassW {
+                style: 0,
+                lpfn_wnd_proc: raw_input_wnd_proc,
+                cb_cls_extra: 0,
+                cb_wnd_extra: 0,
+                h_instance: hmod,
+                h_icon: std::ptr::null_mut(),
+                h_cursor: std::ptr::null_mut(),
+                hbr_background: std::ptr::null_mut(),
+                lpsz_menu_name: std::ptr::null(),
+                lpsz_class_name: class_name.as_ptr(),
+            };
+
+            let _atom = unsafe { RegisterClassW(&wc) };
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class_name.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    hmod,
+                    std::ptr::null_mut(),
+                )
+            };
+
+            if hwnd.is_null() {
+                let _ = ready_tx.send(false);
                 return;
             }
 
-            let mut msg = std::mem::MaybeUninit::<Msg>::zeroed();
-            while unsafe { GetMessageW(msg.as_mut_ptr(), std::ptr::null_mut(), 0, 0) } > 0 {}
+            let devices = [
+                RawInputDevice {
+                    usage_page: HID_USAGE_PAGE_GENERIC,
+                    usage: HID_USAGE_GENERIC_KEYBOARD,
+                    flags: RIDEV_INPUTSINK,
+                    hwnd_target: hwnd,
+                },
+                RawInputDevice {
+                    usage_page: HID_USAGE_PAGE_GENERIC,
+                    usage: HID_USAGE_GENERIC_MOUSE,
+                    flags: RIDEV_INPUTSINK,
+                    hwnd_target: hwnd,
+                },
+            ];
 
-            unsafe {
-                UnhookWindowsHookEx(kbd_hook);
-                UnhookWindowsHookEx(mouse_hook);
+            let registered = unsafe {
+                RegisterRawInputDevices(
+                    devices.as_ptr(),
+                    devices.len() as u32,
+                    size_of::<RawInputDevice>() as u32,
+                )
+            } != 0;
+
+            let _ = ready_tx.send(registered);
+            if !registered {
+                unsafe { DestroyWindow(hwnd) };
+                return;
             }
+
+            let mut msg = MaybeUninit::<Msg>::zeroed();
+            while unsafe { GetMessageW(msg.as_mut_ptr(), std::ptr::null_mut(), 0, 0) } > 0 {
+                unsafe {
+                    TranslateMessage(msg.as_ptr());
+                    DispatchMessageW(msg.as_ptr());
+                }
+            }
+
+            unsafe { DestroyWindow(hwnd) };
         })
         .ok();
 
     let ok = ready_rx.recv().unwrap_or(false);
     if ok {
         InputStatus {
-            backend: "Windows Win32 Hooks".to_string(),
+            backend: "Windows Raw Input".to_string(),
             global_active: true,
             hint: None,
         }
@@ -183,16 +372,38 @@ pub fn start(tx: Sender<InputEvent>) -> InputStatus {
         InputStatus {
             backend: "Local window only".to_string(),
             global_active: false,
-            hint: Some("Falha ao registrar hooks Win32 globais.".to_string()),
+            hint: Some("Falha ao registrar Windows Raw Input.".to_string()),
         }
     }
 }
 
-fn vk_to_key_id(vk: u32) -> Option<KeyId> {
-    Some(match vk {
+fn raw_key_to_key_id(vkey: u16, make_code: u16, flags: u16) -> Option<KeyId> {
+    let is_e0 = (flags & RI_KEY_E0) != 0;
+    Some(match vkey {
         0x08 => KeyId::Backspace,
         0x09 => KeyId::Tab,
         0x0D => KeyId::Enter,
+        0x10 => {
+            if make_code == 0x36 {
+                KeyId::RightShift
+            } else {
+                KeyId::LeftShift
+            }
+        }
+        0x11 => {
+            if is_e0 {
+                KeyId::RightCtrl
+            } else {
+                KeyId::LeftCtrl
+            }
+        }
+        0x12 => {
+            if is_e0 {
+                KeyId::RightAlt
+            } else {
+                KeyId::LeftAlt
+            }
+        }
         0x14 => KeyId::CapsLock,
         0x1B => KeyId::Escape,
         0x20 => KeyId::Space,
@@ -252,11 +463,11 @@ fn vk_to_key_id(vk: u32) -> Option<KeyId> {
         0x79 => KeyId::F10,
         0x7A => KeyId::F11,
         0x7B => KeyId::F12,
-        0xA0 | 0x10 => KeyId::LeftShift,
+        0xA0 => KeyId::LeftShift,
         0xA1 => KeyId::RightShift,
-        0xA2 | 0x11 => KeyId::LeftCtrl,
+        0xA2 => KeyId::LeftCtrl,
         0xA3 => KeyId::RightCtrl,
-        0xA4 | 0x12 => KeyId::LeftAlt,
+        0xA4 => KeyId::LeftAlt,
         0xA5 => KeyId::RightAlt,
         0xBA => KeyId::Semicolon,
         0xBB => KeyId::Equal,
@@ -271,4 +482,35 @@ fn vk_to_key_id(vk: u32) -> Option<KeyId> {
         0xDE => KeyId::Quote,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_input_struct_layouts_match_win32_abi() {
+        assert_eq!(size_of::<RawMouse>(), 24);
+        assert_eq!(size_of::<RawKeyboard>(), 16);
+        assert_eq!(
+            size_of::<RawInputHeader>(),
+            if size_of::<usize>() == 8 { 24 } else { 16 }
+        );
+    }
+
+    #[test]
+    fn raw_modifier_keys_split_left_and_right() {
+        assert_eq!(raw_key_to_key_id(0x10, 0x2A, 0), Some(KeyId::LeftShift));
+        assert_eq!(raw_key_to_key_id(0x10, 0x36, 0), Some(KeyId::RightShift));
+        assert_eq!(raw_key_to_key_id(0x11, 0x1D, 0), Some(KeyId::LeftCtrl));
+        assert_eq!(
+            raw_key_to_key_id(0x11, 0x1D, RI_KEY_E0),
+            Some(KeyId::RightCtrl)
+        );
+        assert_eq!(raw_key_to_key_id(0x12, 0x38, 0), Some(KeyId::LeftAlt));
+        assert_eq!(
+            raw_key_to_key_id(0x12, 0x38, RI_KEY_E0),
+            Some(KeyId::RightAlt)
+        );
+    }
 }

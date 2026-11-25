@@ -1,6 +1,6 @@
 [package]
 name = "gatin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Cross-platform desktop pet black cat that types, uses the mouse, and loves being petted"
 license = "MIT"
@@ -21,8 +21,10 @@ directories = "6.0.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.191"
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
 opt-level = 3
