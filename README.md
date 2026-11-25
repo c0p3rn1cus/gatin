@@ -21,7 +21,15 @@ Um gatinho preto **desktop pet** escrito 100% em **Rust**, rodando de forma nati
   - **Scroll do mouse**: redimensiona o gatinho (`50%` a `250%`)
   - **Botão direito**: abre o menu (Sempre no topo, Teclas flutuantes, Modo Demo, Click-through, Tamanho, Sair)
 
-## Como compilar e rodar
+## Download pronto (Windows, macOS e Linux)
+
+Baixe o pacote compilado para o seu sistema na página de [**Releases**](https://github.com/c0p3rn1cus/gatin/releases/latest):
+
+- **Windows (x86_64)**: `gatin-windows-x86_64.zip` → extraia e execute `gatin.exe`
+- **macOS (Apple Silicon & Intel — Universal)**: `gatin-macos-universal.dmg` (ou `.zip`) → arraste `Gatin.app` para *Aplicativos*
+- **Linux (x86_64)**: `gatin-linux-x86_64.tar.gz` → extraia e execute `./gatin`
+
+## Como compilar do código-fonte
 
 Requisito: [Rust toolchain](https://rustup.rs/) (`rustc` / `cargo`).
 

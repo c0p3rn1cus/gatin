@@ -1,0 +1,147 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Package Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Create tar.gz package
+        run: |
+          mkdir -p dist/gatin-linux-x86_64
+          cp target/release/gatin README.md dist/gatin-linux-x86_64/
+          tar -C dist -czf dist/gatin-linux-x86_64.tar.gz gatin-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatin-linux-x86_64
+          path: dist/gatin-linux-x86_64.tar.gz
+
+  build-windows:
+    name: Package Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/gatin-windows-x86_64 | Out-Null
+          Copy-Item target/release/gatin.exe dist/gatin-windows-x86_64/
+          Copy-Item README.md dist/gatin-windows-x86_64/
+          Compress-Archive -Path dist/gatin-windows-x86_64 -DestinationPath dist/gatin-windows-x86_64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatin-windows-x86_64
+          path: dist/gatin-windows-x86_64.zip
+
+  build-macos:
+    name: Package macOS (Universal Apple Silicon + Intel)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build Apple Silicon & Intel binaries
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: Create Universal Gatin.app, DMG, and ZIP
+        run: |
+          mkdir -p dist/Gatin.app/Contents/MacOS
+          lipo -create \
+            target/aarch64-apple-darwin/release/gatin \
+            target/x86_64-apple-darwin/release/gatin \
+            -output dist/Gatin.app/Contents/MacOS/gatin
+          chmod +x dist/Gatin.app/Contents/MacOS/gatin
+
+          cat > dist/Gatin.app/Contents/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Gatin</string>
+            <key>CFBundleDisplayName</key>
+            <string>Gatin</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.c0p3rn1cus.gatin</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.0</string>
+            <key>CFBundleExecutable</key>
+            <string>gatin</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # Ad-hoc sign so macOS Gatekeeper / Input Monitoring recognizes the bundle cleanly
+          codesign --force --deep --sign - dist/Gatin.app
+
+          # Create drag-and-drop DMG
+          mkdir -p dist/dmg-root
+          cp -R dist/Gatin.app dist/dmg-root/
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname "Gatin" -srcfolder dist/dmg-root -ov -format UDZO dist/gatin-macos-universal.dmg
+
+          # Also provide a zip of Gatin.app
+          ditto -c -k --sequesterRsrc --keepParent dist/Gatin.app dist/gatin-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatin-macos-universal
+          path: |
+            dist/gatin-macos-universal.dmg
+            dist/gatin-macos-universal.zip
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate SHA256 checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS.txt
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "Gatin $TAG" \
+              --generate-notes
+          fi
