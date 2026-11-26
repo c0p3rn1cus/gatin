@@ -77,14 +77,6 @@ fn main() -> eframe::Result<()> {
         config.pet = pet;
     }
 
-    let global_input = GlobalInput::start();
-    let privacy = PrivacyMonitor::start(cli.debug_privacy);
-    eprintln!("[gatin] Input backend: {}", global_input.status.backend);
-    eprintln!("[gatin] Privacy detector: {}", privacy.backend);
-    if let Some(hint) = &global_input.status.hint {
-        eprintln!("[gatin] Aviso: {hint}");
-    }
-
     let width = CANVAS_W * config.scale;
     let height = CANVAS_H * config.scale;
 
@@ -109,24 +101,154 @@ fn main() -> eframe::Result<()> {
         viewport = viewport.with_position([x, y]);
     }
 
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-
     let demo_mode = cli.demo;
-    eframe::run_native(
-        "gatin",
-        options,
-        Box::new(move |cc| {
-            // Keep egui visuals crisp for the right-click context menu
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(GatinApp::new(
-                config,
-                demo_mode,
-                global_input,
-                privacy,
-            )))
-        }),
-    )
+    let debug_privacy = cli.debug_privacy;
+
+    #[cfg(target_os = "windows")]
+    {
+        let glow_options = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
+        };
+
+        let result = match eframe::run_native(
+            "gatin",
+            glow_options,
+            make_app_creator(config.clone(), demo_mode, debug_privacy),
+        ) {
+            Ok(()) => Ok(()),
+            Err(glow_err) => {
+                eprintln!(
+                    "[gatin] OpenGL indisponível ({glow_err}); tentando fallback DirectX 12 / wgpu..."
+                );
+                let wgpu_options = eframe::NativeOptions {
+                    viewport,
+                    renderer: eframe::Renderer::Wgpu,
+                    wgpu_options: windows_wgpu_configuration(),
+                    ..Default::default()
+                };
+                eframe::run_native(
+                    "gatin",
+                    wgpu_options,
+                    make_app_creator(config, demo_mode, debug_privacy),
+                )
+                .map_err(|wgpu_err| format!("OpenGL: {glow_err}\nDirectX/wgpu: {wgpu_err}"))
+            }
+        };
+
+        if let Err(msg) = result {
+            eprintln!("[gatin] Erro fatal: {msg}");
+            show_windows_error(&format!("Não foi possível iniciar o Gatin:\n\n{msg}"));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let options = eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        };
+        eframe::run_native(
+            "gatin",
+            options,
+            make_app_creator(config, demo_mode, debug_privacy),
+        )
+    }
+}
+
+fn make_app_creator(
+    config: AppConfig,
+    demo_mode: bool,
+    debug_privacy: bool,
+) -> eframe::AppCreator<'static> {
+    Box::new(move |cc| {
+        let global_input = GlobalInput::start();
+        let privacy = PrivacyMonitor::start(debug_privacy);
+        eprintln!("[gatin] Input backend: {}", global_input.status.backend);
+        eprintln!("[gatin] Privacy detector: {}", privacy.backend);
+        if let Some(hint) = &global_input.status.hint {
+            eprintln!("[gatin] Aviso: {hint}");
+        }
+        // Keep egui visuals crisp for the right-click context menu
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        Ok(Box::new(GatinApp::new(
+            config,
+            demo_mode,
+            global_input,
+            privacy,
+        )))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    use eframe::wgpu::{Backends, DeviceType, Dx12SwapchainKind};
+    use std::sync::Arc;
+
+    let mut create_new = WgpuSetupCreateNew::default();
+    create_new.instance_descriptor.backends =
+        Backends::from_env().unwrap_or(Backends::DX12 | Backends::VULKAN);
+    create_new
+        .instance_descriptor
+        .backend_options
+        .dx12
+        .presentation_system =
+        Dx12SwapchainKind::from_env().unwrap_or(Dx12SwapchainKind::DxgiFromVisual);
+    // Prefer hardware GPUs when present, but allow CPU/WARP fallback on VMs without 3D acceleration.
+    create_new.native_adapter_selector = Some(Arc::new(|adapters, surface| {
+        let rank = |dt: DeviceType| -> u8 {
+            match dt {
+                DeviceType::DiscreteGpu => 0,
+                DeviceType::IntegratedGpu => 1,
+                DeviceType::VirtualGpu => 2,
+                DeviceType::Cpu => 3,
+                DeviceType::Other => 4,
+            }
+        };
+        adapters
+            .iter()
+            .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+            .min_by_key(|a| rank(a.get_info().device_type))
+            .cloned()
+            .ok_or_else(|| {
+                "Nenhum adaptador gráfico compatível encontrado (DX12/Vulkan/WARP)".to_string()
+            })
+    }));
+
+    WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(create_new),
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_windows_error(message: &str) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut std::ffi::c_void,
+            text: *const u16,
+            caption: *const u16,
+            utype: u32,
+        ) -> i32;
+    }
+    const MB_OK: u32 = 0x0000_0000;
+    const MB_ICONERROR: u32 = 0x0000_0010;
+
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "Gatin - Erro ao iniciar"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
