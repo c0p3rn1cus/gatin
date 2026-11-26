@@ -185,7 +185,8 @@ fn make_app_creator(
 #[cfg(target_os = "windows")]
 fn windows_wgpu_configuration() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
-    use eframe::wgpu::{Backends, DeviceType, Dx12SwapchainKind};
+    use eframe::wgpu::wgt::Dx12SwapchainKind;
+    use eframe::wgpu::{Backends, DeviceType};
     use std::sync::Arc;
 
     let mut create_new = WgpuSetupCreateNew::default();
