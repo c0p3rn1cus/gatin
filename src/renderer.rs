@@ -1,18 +1,12 @@
 use crate::cat::{CANVAS_H, CANVAS_W, CatState, KeyPopup, PawMode, PawState};
 use crate::keyboard::KeyAccent;
+use crate::pet::{PetKind, PetStyle, Species};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Mesh, Painter, Pos2, Rect, Shape, Stroke, Vec2,
     epaint::{PathShape, Vertex},
 };
 
-// Palette matched closely to the reference video frames
-const CAT_BLACK: Color32 = Color32::from_rgb(17, 17, 19);
-const CAT_RIM: Color32 = Color32::from_rgba_premultiplied(210, 214, 208, 220);
-const CAT_WHISKER: Color32 = Color32::from_rgba_premultiplied(220, 224, 218, 230);
-const EYE_LIME: Color32 = Color32::from_rgb(206, 240, 74);
-const EYE_GLOW: Color32 = Color32::from_rgba_premultiplied(165, 200, 48, 90);
-const PUPIL_BLACK: Color32 = Color32::from_rgb(15, 15, 17);
-
+// Palette matched closely to the reference video frames (pet coats live in `pet.rs`)
 const KBD_CASE: Color32 = Color32::from_rgb(24, 24, 27);
 const KBD_CASE_SHADOW: Color32 = Color32::from_rgb(12, 12, 14);
 const KEY_WHITE: Color32 = Color32::from_rgb(244, 244, 239);
@@ -71,10 +65,9 @@ impl CanvasTransform {
 
 /// Returns true if the given virtual canvas point is on the cat's head/ears (petting zone).
 pub fn is_on_cat_head(cat: &CatState, canvas_pt: [f32; 2]) -> bool {
-    let hx = 182.0 + cat.lean_x;
-    let hy = 104.0 + cat.typing_bob;
-    let head_dx = (canvas_pt[0] - hx) / 46.0;
-    let head_dy = (canvas_pt[1] - hy) / 46.0;
+    let hc = cat.head_center();
+    let head_dx = (canvas_pt[0] - hc[0]) / 47.0;
+    let head_dy = (canvas_pt[1] - (hc[1] - 4.0)) / 46.0;
     head_dx * head_dx + head_dy * head_dy <= 1.0
 }
 
@@ -93,11 +86,19 @@ pub fn is_on_cat_body(cat: &CatState, canvas_pt: [f32; 2]) -> bool {
 pub fn render_scene(painter: &Painter, rect: Rect, cat: &CatState, show_keycaps: bool) {
     let tf = CanvasTransform::from_rect(rect);
 
+    let st = cat.pet.style();
+
     draw_desk_shadow(painter, &tf, cat);
-    draw_tail(painter, &tf, cat);
-    draw_hind_paws(painter, &tf, cat);
-    draw_cat_body_and_head(painter, &tf, cat);
-    draw_face(painter, &tf, cat);
+    // Light coats get a soft contour: paint the whole silhouette slightly fatter underneath first
+    if let Some(oc) = st.outline {
+        draw_tail(painter, &tf, cat, &st, Some(oc));
+        draw_hind_paws(painter, &tf, cat, &st, Some(oc));
+        draw_body_and_head(painter, &tf, cat, &st, Some(oc));
+    }
+    draw_tail(painter, &tf, cat, &st, None);
+    draw_hind_paws(painter, &tf, cat, &st, None);
+    draw_body_and_head(painter, &tf, cat, &st, None);
+    draw_face(painter, &tf, cat, &st);
 
     // Desk props (mouse + 180-degree rotated 60% mechanical keyboard)
     draw_mouse(painter, &tf, cat);
@@ -105,10 +106,10 @@ pub fn render_scene(painter: &Painter, rect: Rect, cat: &CatState, show_keycaps:
 
     // Front arms & paws (rendered OVER body and keyboard/mouse — or covering the eyes in password mode!)
     if cat.cover_blend > 0.02 {
-        draw_covering_paws(painter, &tf, cat);
+        draw_covering_paws(painter, &tf, cat, &st);
     } else {
-        draw_paw(painter, &tf, cat, &cat.left_paw, true);
-        draw_paw(painter, &tf, cat, &cat.right_paw, false);
+        draw_paw(painter, &tf, cat, &st, &cat.left_paw, true);
+        draw_paw(painter, &tf, cat, &st, &cat.right_paw, false);
     }
 
     // Floating white keycap badges on top (strictly hidden in password mode!)
@@ -123,45 +124,180 @@ fn draw_desk_shadow(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
     // Very soft shadow beneath keyboard and mouse (no crisp fringe stroke!)
     let shadow_col = Color32::from_rgba_unmultiplied(0, 0, 0, 34);
     let kbd_shadow = vec![
-        tf.pt(82.0, 298.0),
-        tf.pt(308.0, 298.0),
-        tf.pt(313.0, 306.0),
-        tf.pt(77.0, 306.0),
+        tf.pt(80.0, 302.0),
+        tf.pt(310.0, 302.0),
+        tf.pt(316.0, 310.0),
+        tf.pt(74.0, 310.0),
     ];
     fill_polygon_no_fringe(painter, &kbd_shadow, shadow_col);
 
     let m = cat.mouse_current_pos();
-    painter.circle_filled(
-        tf.pt(m[0], m[1] + 6.0),
-        tf.s(18.0),
-        Color32::from_rgba_unmultiplied(0, 0, 0, 28),
-    );
+    let shadow = sample_ellipse(tf.pt(m[0] + 1.0, m[1] + 5.5), tf.s(15.0), tf.s(14.0), 24);
+    fill_polygon_no_fringe(painter, &shadow, Color32::from_rgba_unmultiplied(0, 0, 0, 30));
 }
 
-fn draw_tail(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
-    let wag = cat.tail_phase.sin();
-    let wag2 = (cat.tail_phase * 1.3 + 0.7).cos();
-
-    let p0 = tf.pt(216.0 + cat.lean_x * 0.15, 208.0);
-    let p1 = tf.pt(246.0, 212.0 + wag * 4.0);
-    let p2 = tf.pt(254.0 + wag * 5.0, 174.0 + wag2 * 5.0);
-    let p3 = tf.pt(286.0 + wag * 8.0, 175.0 + wag2 * 6.0);
-
-    let tail_pts = sample_cubic_bezier(p0, p1, p2, p3, 24);
-    draw_thick_round_polyline(painter, &tail_pts, tf.s(14.5), CAT_BLACK);
+/// Fills a silhouette piece, or — in the outline pre-pass — strokes its fattened contour.
+fn fill_part(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    pts: &[Pos2],
+    color: Color32,
+    pass: Option<Color32>,
+) {
+    match pass {
+        Some(oc) => {
+            painter.add(Shape::Path(PathShape::closed_line(
+                pts.to_vec(),
+                Stroke::new(tf.s(2.8), oc),
+            )));
+        }
+        None => fill_smooth_polygon(painter, pts, color),
+    }
 }
 
-fn draw_hind_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
-    // Cute small rounded hind paws peeking out at the bottom corners of the cat's seated body
+/// Maps a point of the seated torso so markings follow the body as it leans and bounces.
+fn body_pt(cat: &CatState, x: f32, y: f32) -> [f32; 2] {
+    let k = ((213.0 - y) / 81.0).clamp(0.0, 1.0);
+    let dy = cat.head_center()[1] - 108.0;
+    [x + cat.lean_x * (0.14 + 0.78 * k), y + dy * k]
+}
+
+fn body_ellipse(tf: &CanvasTransform, cat: &CatState, x: f32, y: f32, rx: f32, ry: f32) -> Vec<Pos2> {
+    let c = body_pt(cat, x, y);
+    sample_ellipse(tf.pt(c[0], c[1]), tf.s(rx), tf.s(ry), 22)
+}
+
+/// Head outline offset for angle `a` (0 = viewer's right, PI/2 = chin).
+fn head_outline(species: Species, a: f32) -> (f32, f32) {
+    match species {
+        Species::Cat => {
+            let cheek = if a.sin() > 0.0 { 1.0 + 0.055 * a.sin() } else { 1.0 };
+            (a.cos() * 43.5 * cheek, a.sin() * 36.0)
+        }
+        Species::Dog => {
+            let cheek = if a.sin() > 0.0 { 1.0 + 0.03 * a.sin() } else { 1.0 };
+            (a.cos() * 40.5 * cheek, a.sin() * 37.0)
+        }
+        Species::Dino => {
+            // Round skull that widens into a chunky snout
+            let (jaw, ry) = if a.sin() > 0.0 { (1.0 + 0.16 * a.sin(), 40.0) } else { (1.0, 36.5) };
+            (a.cos() * 39.5 * jaw, a.sin() * ry)
+        }
+        Species::Alien => {
+            // Big-brained dome tapering to a small pointed chin
+            let taper = 1.0 - 0.4 * a.sin().max(0.0);
+            (a.cos() * 45.0 * taper, a.sin() * 38.0)
+        }
+        Species::Capybara => {
+            // Tall blocky head: flat narrow crown widening into a big square muzzle
+            let sq = |v: f32| v.signum() * v.abs().powf(0.74);
+            (sq(a.cos()) * (39.0 + 3.5 * a.sin()), sq(a.sin()) * 40.0)
+        }
+    }
+}
+
+fn draw_tail(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    pass: Option<Color32>,
+) {
+    let grow = if pass.is_some() { tf.s(2.6) } else { 0.0 };
+    let col = pass.unwrap_or(st.tail);
+
+    match st.species {
+        // Capybaras barely have a tail at all
+        Species::Capybara | Species::Alien => {}
+        Species::Dino => {
+            // Heavy tail tapering to a point, with a row of plates along the top
+            let sway = (cat.tail_phase * 0.8).sin();
+            let sway2 = (cat.tail_phase * 0.8 - 1.0).sin();
+            let p0 = tf.pt(210.0 + cat.lean_x * 0.15, 208.0);
+            let p1 = tf.pt(250.0, 216.0 + sway * 2.0);
+            let p2 = tf.pt(272.0 + sway2 * 3.0, 205.0 + sway2 * 3.0);
+            let p3 = tf.pt(296.0 + sway2 * 5.0, 182.0 + sway2 * 8.0);
+            let pts = sample_cubic_bezier(p0, p1, p2, p3, 24);
+            let (w0, w1) = (tf.s(31.0), tf.s(5.0));
+            if pass.is_none() {
+                for i in [4usize, 8, 12, 16, 20] {
+                    let t = i as f32 / 24.0;
+                    let dir = (pts[i + 1] - pts[i - 1]).normalized();
+                    let up = Vec2::new(dir.y, -dir.x);
+                    let hw = limb_half_width(t, w0, w1);
+                    let size = tf.s(8.5 - t * 4.5);
+                    let base = pts[i] + up * (hw - tf.s(1.5));
+                    let plate = vec![base - dir * size, base + up * size * 1.25, base + dir * size];
+                    fill_smooth_polygon(painter, &plate, st.accent);
+                }
+            }
+            draw_tapered_limb(painter, &pts, w0 + grow, w1 + grow, col);
+        }
+        Species::Dog => {
+            // Short upright tail with a fast, wide, happy wag
+            let ph = cat.tail_phase * 2.4;
+            let wag = ph.sin();
+            let wag2 = (ph - 0.7).sin();
+            let amp = 0.55 + cat.typing_energy.min(1.0) * 0.3 + cat.pet_level * 0.45;
+            let p0 = tf.pt(216.0 + cat.lean_x * 0.15, 207.0);
+            let p1 = tf.pt(240.0, 208.0);
+            let p2 = tf.pt(246.0 + wag * 6.0 * amp, 188.0);
+            let p3 = tf.pt(251.0 + wag2 * 15.0 * amp, 165.0 + wag2.abs() * 3.0);
+            let pts = sample_cubic_bezier(p0, p1, p2, p3, 20);
+            draw_tapered_limb(painter, &pts, tf.s(12.0) + grow, tf.s(8.0) + grow, col);
+            if let (None, Some(tip)) = (pass, st.tail_tip) {
+                draw_limb_range(painter, &pts, tf.s(12.0), tf.s(8.0), 16, 20, tip, true);
+            }
+        }
+        Species::Cat => {
+            // A wave travels from the base to the tip, so the tip always swings the most
+            let wag = cat.tail_phase.sin();
+            let wag2 = (cat.tail_phase - 0.9).sin();
+            let wag3 = (cat.tail_phase - 1.8).sin();
+
+            let p0 = tf.pt(214.0 + cat.lean_x * 0.15, 210.0);
+            let p1 = tf.pt(247.0, 214.0 + wag * 3.0);
+            let p2 = tf.pt(252.0 + wag2 * 5.0, 177.0 + wag2 * 4.0);
+            let p3 = tf.pt(284.0 + wag3 * 7.0, 174.0 + wag3 * 7.0);
+
+            let pts = sample_cubic_bezier(p0, p1, p2, p3, 26);
+            // Slightly plumper toward the blunt rounded tip, like the reference
+            let (w0, w1) = (tf.s(13.0), tf.s(15.5));
+            draw_tapered_limb(painter, &pts, w0 + grow, w1 + grow, col);
+            if pass.is_none() {
+                if cat.pet == PetKind::Bengal {
+                    for (i0, i1) in [(8, 10), (13, 15), (18, 20)] {
+                        draw_limb_range(painter, &pts, w0, w1, i0, i1, st.marking, false);
+                    }
+                }
+                if let Some(tip) = st.tail_tip {
+                    draw_limb_range(painter, &pts, w0, w1, 22, 26, tip, true);
+                }
+            }
+        }
+    }
+}
+
+fn draw_hind_paws(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    pass: Option<Color32>,
+) {
+    // Cute small rounded hind paws peeking out at the bottom corners of the seated body
     let lx = 148.0 + cat.lean_x * 0.12;
     let rx = 216.0 + cat.lean_x * 0.12;
-    let y = 226.0;
+    let y = 222.5;
 
     for (cx, side) in [(lx, -1.0_f32), (rx, 1.0_f32)] {
         let ellipse = sample_ellipse(tf.pt(cx, y), tf.s(14.0), tf.s(11.0), 20);
-        fill_smooth_polygon(painter, &ellipse, CAT_BLACK);
+        fill_part(painter, tf, &ellipse, st.hind_paw, pass);
+        if pass.is_some() {
+            continue;
+        }
 
-        // Delicate pale rim highlight along the lower outer edge (visible in frame_01/03/04)
+        // Delicate rim highlight along the lower outer edge
         let mut arc = Vec::with_capacity(12);
         for i in 0..=10 {
             let t = i as f32 / 10.0;
@@ -174,117 +310,527 @@ fn draw_hind_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
         }
         painter.add(Shape::Path(PathShape::line(
             arc,
-            Stroke::new(tf.s(1.3), CAT_RIM),
+            Stroke::new(tf.s(1.3), with_alpha(st.rim, 0.86)),
         )));
     }
 }
 
-fn draw_cat_body_and_head(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
+fn draw_body_and_head(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    pass: Option<Color32>,
+) {
     let lx = cat.lean_x;
-    let bob = cat.typing_bob;
+    let head_center = cat.head_center();
+    // Vertical travel of the head (bounce, stretch, breathing) drags the shoulders along
+    let dy = head_center[1] - 108.0;
+    let br = cat.breath;
+    // A key-strike dip squashes the chest outward a touch (squash & stretch)
+    let squash = cat.typing_bob.max(0.0) * 0.45;
+    let belly = br * 1.1 + squash;
 
     // 1. Seated pear-shaped torso (bottom anchored at x=182, top leans smoothly with head!)
     let mut torso = Vec::with_capacity(48);
-    // Start at left neck, curve out along left shoulder/hip, across bottom, up right hip/shoulder
-    let left_neck = tf.pt(153.0 + lx * 0.92, 134.0 + bob);
-    let right_neck = tf.pt(211.0 + lx * 0.92, 134.0 + bob);
-    let left_hip = tf.pt(136.0 + lx * 0.16, 214.0);
-    let right_hip = tf.pt(228.0 + lx * 0.16, 214.0);
+    let left_neck = tf.pt(152.0 + lx * 0.92, 132.0 + dy);
+    let right_neck = tf.pt(212.0 + lx * 0.92, 132.0 + dy);
+    let left_hip = tf.pt(133.0 + lx * 0.14, 213.0);
+    let right_hip = tf.pt(231.0 + lx * 0.14, 213.0);
 
-    // Left flank
     torso.extend(sample_cubic_bezier(
         left_neck,
-        tf.pt(142.0 + lx * 0.62, 162.0 + bob * 0.6),
-        tf.pt(126.0 + lx * 0.25, 188.0),
+        tf.pt(137.0 + lx * 0.62 - belly * 0.5, 158.0 + dy * 0.6),
+        tf.pt(117.0 + lx * 0.22 - belly, 190.0),
         left_hip,
         14,
     ));
-    // Bottom curve
     torso.extend(sample_cubic_bezier(
         left_hip,
-        tf.pt(150.0 + lx * 0.1, 232.0),
-        tf.pt(214.0 + lx * 0.1, 232.0),
+        tf.pt(146.0 + lx * 0.1, 231.0),
+        tf.pt(218.0 + lx * 0.1, 231.0),
         right_hip,
         12,
     ));
-    // Right flank
     torso.extend(sample_cubic_bezier(
         right_hip,
-        tf.pt(238.0 + lx * 0.25, 188.0),
-        tf.pt(222.0 + lx * 0.62, 162.0 + bob * 0.6),
+        tf.pt(247.0 + lx * 0.22 + belly, 190.0),
+        tf.pt(227.0 + lx * 0.62 + belly * 0.5, 158.0 + dy * 0.6),
         right_neck,
         14,
     ));
-    fill_smooth_polygon(painter, &torso, CAT_BLACK);
+    fill_part(painter, tf, &torso, st.body, pass);
+    if pass.is_none() {
+        draw_body_markings(painter, tf, cat, st);
+    }
 
-    // 2. Head + rounded-point ears (rotated smoothly by head_tilt!)
-    let head_center = [182.0 + lx, 108.0 + bob];
+    // 2. Head + ears (rotated smoothly by head_tilt!)
     let tilt = cat.head_tilt;
     let rot = |dx: f32, dy: f32| -> Pos2 {
         let c = tilt.cos();
         let s = tilt.sin();
-        let rx = dx * c - dy * s;
-        let ry = dx * s + dy * c;
-        tf.pt(head_center[0] + rx, head_center[1] + ry)
+        tf.pt(
+            head_center[0] + dx * c - dy * s,
+            head_center[1] + dx * s + dy * c,
+        )
     };
 
-    // Main rounded head ellipse (slightly wider cheeks like the video)
-    let mut head_pts = Vec::with_capacity(40);
-    for i in 0..40 {
-        let a = (i as f32 / 40.0) * std::f32::consts::TAU;
-        // Slightly fuller lower cheeks for extra cuteness
-        let cheek = if a.sin() > 0.0 { 1.0 + 0.06 * a.sin() } else { 1.0 };
-        let dx = a.cos() * 41.5 * cheek;
-        let dy = a.sin() * 34.5;
-        head_pts.push(rot(dx, dy));
+    // Capybara and dinosaur turn their long snouts sideways (toward the mouse)
+    if let Some(outline) = profile_head_outline(st.species) {
+        draw_profile_head(painter, tf, cat, st, pass, &rot, &outline);
+        if pass.is_none() {
+            draw_head_markings(painter, tf, cat, st, &rot);
+        }
+        return;
     }
-    fill_smooth_polygon(painter, &head_pts, CAT_BLACK);
 
-    // Left ear (viewer's left) — soft rounded triangular cat ear
-    let mut left_ear = Vec::new();
-    left_ear.extend(sample_cubic_bezier(
-        rot(-35.0, -14.0),
-        rot(-37.0, -34.0),
-        rot(-33.0, -54.0),
-        rot(-24.0, -55.0),
-        10,
-    ));
-    left_ear.extend(sample_cubic_bezier(
-        rot(-24.0, -55.0),
-        rot(-16.0, -56.0),
-        rot(-10.0, -40.0),
-        rot(-6.0, -28.0),
-        10,
-    ));
-    left_ear.push(rot(-20.0, -18.0));
-    fill_smooth_polygon(painter, &left_ear, CAT_BLACK);
+    let head_pts: Vec<Pos2> = (0..44)
+        .map(|i| {
+            let a = (i as f32 / 44.0) * std::f32::consts::TAU;
+            let (dx, dy) = head_outline(st.species, a);
+            rot(dx, dy)
+        })
+        .collect();
 
-    // Right ear (viewer's right)
-    let mut right_ear = Vec::new();
-    right_ear.extend(sample_cubic_bezier(
-        rot(6.0, -28.0),
-        rot(10.0, -40.0),
-        rot(16.0, -56.0),
-        rot(24.0, -55.0),
-        10,
-    ));
-    right_ear.extend(sample_cubic_bezier(
-        rot(24.0, -55.0),
-        rot(33.0, -54.0),
-        rot(37.0, -34.0),
-        rot(35.0, -14.0),
-        10,
-    ));
-    right_ear.push(rot(20.0, -18.0));
-    fill_smooth_polygon(painter, &right_ear, CAT_BLACK);
+    if st.species == Species::Alien {
+        // Two springy antennae with glowing tips that bob as it types
+        for (idx, side) in [(0usize, -1.0_f32), (1usize, 1.0_f32)] {
+            let sway = (cat.time * 2.3 + side).sin() * 1.6 + cat.ear_twitch[idx] * 4.0 * side
+                - cat.lean_x * 0.25;
+            let bob = cat.typing_bob * 1.4 - cat.pet_level * 3.0;
+            let base = (side * 15.0, -33.0);
+            let tip = (side * 25.0 + sway, -58.0 + bob);
+            let ctrl = (side * 15.0 + sway * 0.3, -50.0 + bob * 0.5);
+            let stalk: Vec<Pos2> = (0..=10)
+                .map(|i| {
+                    let t = i as f32 / 10.0;
+                    let u = 1.0 - t;
+                    rot(
+                        u * u * base.0 + 2.0 * u * t * ctrl.0 + t * t * tip.0,
+                        u * u * base.1 + 2.0 * u * t * ctrl.1 + t * t * tip.1,
+                    )
+                })
+                .collect();
+            let tip_pos = rot(tip.0, tip.1);
+            match pass {
+                Some(oc) => {
+                    painter.add(Shape::Path(PathShape::line(stalk, Stroke::new(tf.s(6.0), oc))));
+                    painter.circle_filled(tip_pos, tf.s(6.6), oc);
+                }
+                None => {
+                    painter.add(Shape::Path(PathShape::line(
+                        stalk,
+                        Stroke::new(tf.s(3.4), st.body),
+                    )));
+                    let pulse = 0.5 + 0.5 * (cat.time * 3.0 + side).sin();
+                    let glow = cat.typing_energy.min(1.0).max(cat.mouse_click_glow);
+                    painter.circle_filled(
+                        tip_pos,
+                        tf.s(7.5 + glow * 2.5),
+                        with_alpha(st.accent, 0.16 + 0.1 * pulse + 0.25 * glow),
+                    );
+                    painter.circle_filled(tip_pos, tf.s(5.0), st.accent);
+                    painter.circle_filled(
+                        tip_pos + Vec2::new(-tf.s(1.5), -tf.s(1.6)),
+                        tf.s(1.5),
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 190),
+                    );
+                }
+            }
+        }
+    }
+    fill_part(painter, tf, &head_pts, st.body, pass);
+
+    for (idx, side) in [(0usize, -1.0_f32), (1usize, 1.0_f32)] {
+        let tw = cat.ear_twitch[idx];
+        // Flick = small rotation around the ear root, plus petting/drowsy flattening
+        let flat = cat.pet_level * 0.16 + cat.drowsy * 0.08;
+        let ang = side * (tw * 0.2 + flat);
+        let (pc, ps) = (ang.cos(), ang.sin());
+        let (px, py) = match st.species {
+            Species::Cat => (22.0, -22.0),
+            Species::Dog => (30.0, -27.0),
+            Species::Capybara | Species::Dino | Species::Alien => (0.0, 0.0),
+        };
+        // Mirrored for the right ear, rotated about the root pivot
+        let ear = |dx: f32, dy: f32| -> Pos2 {
+            let (x, y) = (dx - px, dy - py);
+            let ex = px + x * pc - y * ps * side;
+            let ey = py + x * ps * side + y * pc;
+            rot(side * ex, ey)
+        };
+
+        let mut pts = Vec::new();
+        match st.species {
+            Species::Cat => {
+                // Short, wide-set triangular ears with soft tips
+                pts.extend(sample_cubic_bezier(
+                    ear(39.0, -11.0),
+                    ear(41.0, -27.0),
+                    ear(38.0, -44.5),
+                    ear(30.5, -47.0),
+                    10,
+                ));
+                pts.extend(sample_cubic_bezier(
+                    ear(30.5, -47.0),
+                    ear(23.5, -49.0),
+                    ear(14.0, -39.0),
+                    ear(6.0, -30.0),
+                    10,
+                ));
+                pts.push(ear(21.0, -15.0));
+            }
+            Species::Dog => {
+                // Floppy ears hanging down the sides of the head
+                pts.extend(sample_cubic_bezier(
+                    ear(20.0, -33.0),
+                    ear(34.0, -40.0),
+                    ear(50.0, -32.0),
+                    ear(51.0, -12.0),
+                    10,
+                ));
+                pts.extend(sample_cubic_bezier(
+                    ear(51.0, -12.0),
+                    ear(52.0, 4.0),
+                    ear(45.0, 13.0),
+                    ear(39.0, 8.0),
+                    10,
+                ));
+                pts.extend(sample_cubic_bezier(
+                    ear(39.0, 8.0),
+                    ear(35.0, 0.0),
+                    ear(33.0, -14.0),
+                    ear(26.0, -22.0),
+                    8,
+                ));
+            }
+            // Drawn by `draw_profile_head`
+            Species::Capybara | Species::Dino => continue,
+            // Antennae instead of ears (drawn before the head)
+            Species::Alien => continue,
+        }
+        if side > 0.0 {
+            pts.reverse();
+        }
+        fill_part(painter, tf, &pts, st.ears[idx], pass);
+    }
+
+    if pass.is_none() {
+        draw_head_markings(painter, tf, cat, st, &rot);
+    }
 }
 
-fn draw_face(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
-    let head_center = [182.0 + cat.lean_x, 108.0 + cat.typing_bob];
+/// Side-view head outline (snout pointing to the viewer's left) as closed polygon offsets
+/// from the head center, for the long-snouted pets.
+fn profile_head_outline(species: Species) -> Option<Vec<(f32, f32)>> {
+    type Seg = [(f32, f32); 4];
+    let segs: [Seg; 7] = match species {
+        // Round skull, long snout with a nostril bump, deep jaw
+        Species::Dino => [
+            [(22.0, -34.0), (4.0, -40.0), (-10.0, -32.0), (-14.0, -20.0)],
+            [(-14.0, -20.0), (-22.0, -10.0), (-36.0, -15.0), (-46.0, -9.0)],
+            [(-46.0, -9.0), (-52.0, -8.0), (-55.0, 0.0), (-53.0, 8.0)],
+            [(-53.0, 8.0), (-53.0, 17.0), (-50.0, 23.0), (-43.0, 25.0)],
+            [(-43.0, 25.0), (-33.0, 29.0), (-20.0, 31.0), (-6.0, 30.0)],
+            [(-6.0, 30.0), (10.0, 30.0), (30.0, 28.0), (40.0, 6.0)],
+            [(40.0, 6.0), (42.0, -12.0), (36.0, -29.0), (22.0, -34.0)],
+        ],
+        // One blunt brick: flat crown, square muzzle as deep as the skull
+        Species::Capybara => [
+            [(28.0, -31.0), (10.0, -35.0), (-22.0, -30.0), (-40.0, -23.0)],
+            [(-40.0, -23.0), (-48.0, -20.0), (-52.0, -12.0), (-52.0, -3.0)],
+            [(-52.0, -3.0), (-52.0, 10.0), (-51.0, 20.0), (-44.0, 23.0)],
+            [(-44.0, 23.0), (-36.0, 27.0), (-20.0, 31.0), (-6.0, 30.0)],
+            [(-6.0, 30.0), (10.0, 30.0), (30.0, 28.0), (40.0, 6.0)],
+            [(40.0, 6.0), (42.0, -6.0), (41.0, -16.0), (38.0, -23.0)],
+            [(38.0, -23.0), (36.0, -28.0), (33.0, -30.0), (28.0, -31.0)],
+        ],
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(70);
+    for [p0, p1, p2, p3] in segs {
+        for i in 0..10 {
+            let t = i as f32 / 10.0;
+            let u = 1.0 - t;
+            let b = |a: f32, b: f32, c: f32, d: f32| {
+                u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
+            };
+            out.push((b(p0.0, p1.0, p2.0, p3.0), b(p0.1, p1.1, p2.1, p3.1)));
+        }
+    }
+    Some(out)
+}
+
+fn draw_profile_head(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    pass: Option<Color32>,
+    rot: &dyn Fn(f32, f32) -> Pos2,
+    outline: &[(f32, f32)],
+) {
+    let oval = |cx: f32, cy: f32, rx: f32, ry: f32, lean: f32| -> Vec<Pos2> {
+        (0..18)
+            .map(|i| {
+                let a = (i as f32 / 18.0) * std::f32::consts::TAU;
+                let (x, y) = (a.cos() * rx, a.sin() * ry);
+                rot(cx + x * lean.cos() - y * lean.sin(), cy + x * lean.sin() + y * lean.cos())
+            })
+            .collect()
+    };
+    let flick = cat.ear_twitch[1] * 2.5 - cat.pet_level * 2.0;
+
+    match st.species {
+        Species::Dino if pass.is_none() => {
+            // Plates running over the crown and down the back of the skull
+            let n = outline.len();
+            for (idx, h) in [(63usize, 9.0_f32), (67, 12.0), (1, 12.0), (5, 9.0)] {
+                let p = outline[idx % n];
+                let a = outline[(idx + n - 1) % n];
+                let b = outline[(idx + 1) % n];
+                let (tx, ty) = (b.0 - a.0, b.1 - a.1);
+                let len = (tx * tx + ty * ty).sqrt().max(0.001);
+                let (tx, ty) = (tx / len, ty / len);
+                // Outward normal: the one pointing away from the skull center
+                let (mut nx, mut ny) = (-ty, tx);
+                if nx * (p.0 - 8.0) + ny * (p.1 + 4.0) < 0.0 {
+                    nx = -nx;
+                    ny = -ny;
+                }
+                let plate = vec![
+                    rot(p.0 - tx * 7.0 - nx * 3.0, p.1 - ty * 7.0 - ny * 3.0),
+                    rot(p.0 + nx * h, p.1 + ny * h),
+                    rot(p.0 + tx * 7.0 - nx * 3.0, p.1 + ty * 7.0 - ny * 3.0),
+                ];
+                fill_smooth_polygon(painter, &plate, st.accent);
+            }
+        }
+        Species::Capybara => {
+            // Far ear peeks out from behind the crown
+            let far = oval(11.0, -34.0 - flick * 0.5, 5.5, 6.5, -0.2);
+            fill_part(painter, tf, &far, lerp_color(st.body, st.rim, 0.35), pass);
+        }
+        _ => {}
+    }
+
+    let head: Vec<Pos2> = outline.iter().map(|&(x, y)| rot(x, y)).collect();
+    fill_part(painter, tf, &head, st.body, pass);
+
+    if st.species == Species::Capybara {
+        // Near ear: a small rounded flap set far back on the head
+        let near = oval(27.0, -29.0 - flick, 7.0, 8.5, 0.35);
+        fill_part(painter, tf, &near, lerp_color(st.body, st.rim, 0.18), pass);
+        if pass.is_none() {
+            let inner = oval(27.5, -28.0 - flick, 3.6, 5.0, 0.35);
+            fill_smooth_polygon(painter, &inner, st.rim);
+        }
+    }
+}
+
+/// Coat markings on the torso (drawn before the head so bibs tuck under the chin).
+fn draw_body_markings(painter: &Painter, tf: &CanvasTransform, cat: &CatState, st: &PetStyle) {
+    match cat.pet {
+        PetKind::BlackCat | PetKind::Siamese => {}
+        PetKind::Alien => {
+            let belly = body_ellipse(tf, cat, 182.0, 182.0, 17.0, 27.0);
+            fill_smooth_polygon(painter, &belly, st.marking);
+        }
+        PetKind::Capybara => {
+            // Shaggy chest fur ticks
+            let stroke = Stroke::new(tf.s(1.3), with_alpha(st.rim, 0.75));
+            for (x, y) in [(175.0, 156.0), (190.0, 162.0), (181.0, 171.0), (187.0, 181.0)] {
+                let a = body_pt(cat, x - 3.2, y);
+                let b = body_pt(cat, x, y + 3.4);
+                let c = body_pt(cat, x + 3.2, y);
+                painter.add(Shape::Path(PathShape::line(
+                    vec![tf.pt(a[0], a[1]), tf.pt(b[0], b[1]), tf.pt(c[0], c[1])],
+                    stroke,
+                )));
+            }
+        }
+        PetKind::Dino => {
+            // Darker scales on the flanks
+            let scale_col = lerp_color(st.body, st.rim, 0.45);
+            for (x, y, r) in [
+                (147.0, 174.0, 4.2),
+                (139.0, 193.0, 3.6),
+                (152.0, 205.0, 3.2),
+                (218.0, 174.0, 4.2),
+                (227.0, 193.0, 3.6),
+                (213.0, 205.0, 3.2),
+            ] {
+                let spot = body_ellipse(tf, cat, x, y, r, r * 0.85);
+                fill_smooth_polygon(painter, &spot, scale_col);
+            }
+            // Pale belly plate with segment creases
+            let belly = body_ellipse(tf, cat, 182.0, 181.0, 19.0, 31.0);
+            fill_smooth_polygon(painter, &belly, st.marking);
+            let crease = Stroke::new(tf.s(1.2), lerp_color(st.marking, st.rim, 0.4));
+            for (y, hw) in [(162.0_f32, 14.0_f32), (173.0, 17.5), (184.0, 18.5), (195.0, 17.0)] {
+                let pts: Vec<Pos2> = (0..=8)
+                    .map(|i| {
+                        let t = i as f32 / 8.0 * 2.0 - 1.0;
+                        let p = body_pt(cat, 182.0 + t * hw, y + (1.0 - t * t) * 2.2);
+                        tf.pt(p[0], p[1])
+                    })
+                    .collect();
+                painter.add(Shape::Path(PathShape::line(pts, crease)));
+            }
+        }
+        PetKind::Tuxedo => {
+            let bib = body_ellipse(tf, cat, 182.0, 172.0, 16.0, 27.0);
+            fill_smooth_polygon(painter, &bib, st.marking);
+        }
+        PetKind::Dog => {
+            let chest = body_ellipse(tf, cat, 182.0, 170.0, 13.0, 23.0);
+            fill_smooth_polygon(painter, &chest, st.marking);
+        }
+        PetKind::Bengal => {
+            let chest = body_ellipse(tf, cat, 182.0, 171.0, 12.0, 22.0);
+            fill_smooth_polygon(painter, &chest, st.accent);
+            // Rosette-like spots scattered over both flanks
+            let spots = [
+                (148.0, 164.0, 4.6, 3.4),
+                (138.0, 184.0, 4.2, 3.6),
+                (152.0, 199.0, 4.8, 3.2),
+                (160.0, 181.0, 3.6, 3.0),
+                (143.0, 209.0, 3.8, 2.8),
+                (216.0, 164.0, 4.6, 3.4),
+                (227.0, 185.0, 4.2, 3.6),
+                (212.0, 200.0, 4.8, 3.2),
+                (205.0, 182.0, 3.6, 3.0),
+                (222.0, 209.0, 3.8, 2.8),
+            ];
+            for (x, y, rx, ry) in spots {
+                let spot = body_ellipse(tf, cat, x, y, rx, ry);
+                fill_smooth_polygon(painter, &spot, st.marking);
+            }
+        }
+        PetKind::Calico => {
+            let orange = body_ellipse(tf, cat, 215.0, 183.0, 14.0, 18.0);
+            fill_smooth_polygon(painter, &orange, st.marking);
+            let black = body_ellipse(tf, cat, 148.0, 199.0, 12.5, 10.5);
+            fill_smooth_polygon(painter, &black, st.accent);
+        }
+    }
+}
+
+/// Coat markings fixed to the head (muzzles, blazes, patches, the capybara's tangerine).
+fn draw_head_markings(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    rot: &dyn Fn(f32, f32) -> Pos2,
+) {
+    let oval = |cx: f32, cy: f32, rx: f32, ry: f32| -> Vec<Pos2> {
+        (0..22)
+            .map(|i| {
+                let a = (i as f32 / 22.0) * std::f32::consts::TAU;
+                rot(cx + a.cos() * rx, cy + a.sin() * ry)
+            })
+            .collect()
+    };
+    // Patch hugging the head outline between two angles, closed by an inner path
+    let head_patch = |a0: f32, a1: f32, inner: &[(f32, f32)]| -> Vec<Pos2> {
+        let mut pts: Vec<Pos2> = (0..=14)
+            .map(|i| {
+                let a = (a0 + (a1 - a0) * (i as f32 / 14.0)).to_radians();
+                let (dx, dy) = head_outline(st.species, a);
+                rot(dx * 0.995, dy * 0.995)
+            })
+            .collect();
+        pts.extend(inner.iter().map(|&(x, y)| rot(x, y)));
+        pts
+    };
+
+    match cat.pet {
+        PetKind::BlackCat => {}
+        PetKind::Alien => {
+            let spot_col = lerp_color(st.body, st.rim, 0.4);
+            for (x, y, r) in [(-10.0, -27.0, 3.2), (2.0, -30.0, 2.2), (13.0, -25.0, 2.6)] {
+                fill_smooth_polygon(painter, &oval(x, y, r, r * 0.8), spot_col);
+            }
+        }
+        PetKind::Dino => {
+            let scale_col = lerp_color(st.body, st.rim, 0.45);
+            for (x, y, r) in [(22.0, -20.0, 3.4), (31.0, -8.0, 2.8), (12.0, -27.0, 2.4), (27.0, 6.0, 2.4)] {
+                fill_smooth_polygon(painter, &oval(x, y, r, r * 0.85), scale_col);
+            }
+        }
+        PetKind::Siamese => {
+            // Dark mask over the eyes and muzzle
+            fill_smooth_polygon(painter, &oval(0.0, 5.0, 31.0, 22.5), st.marking);
+        }
+        PetKind::Tuxedo => {
+            fill_smooth_polygon(painter, &oval(0.0, 16.0, 15.5, 11.5), st.marking);
+            let blaze = vec![rot(-2.6, -24.0), rot(2.6, -24.0), rot(6.5, 9.0), rot(-6.5, 9.0)];
+            fill_smooth_polygon(painter, &blaze, st.marking);
+        }
+        PetKind::Bengal => {
+            fill_smooth_polygon(painter, &oval(0.0, 15.5, 14.5, 10.5), st.accent);
+            let stroke = Stroke::new(tf.s(2.4), st.marking);
+            // Tabby "M" on the forehead + a stripe on each cheek
+            for (x0, y0, x1, y1) in [
+                (-9.0, -31.0, -6.5, -19.0),
+                (0.0, -33.0, 0.0, -20.0),
+                (9.0, -31.0, 6.5, -19.0),
+                (-41.0, -2.0, -32.0, 1.0),
+                (41.0, -2.0, 32.0, 1.0),
+                (-41.0, 6.0, -33.0, 7.5),
+                (41.0, 6.0, 33.0, 7.5),
+            ] {
+                painter.line_segment([rot(x0, y0), rot(x1, y1)], stroke);
+            }
+        }
+        PetKind::Calico => {
+            // Orange over the left eye, black over the right, white blaze down the middle
+            let orange = head_patch(
+                172.0,
+                263.0,
+                &[(-5.0, -22.0), (-3.5, -6.0), (-9.0, 6.0), (-24.0, 11.0)],
+            );
+            fill_smooth_polygon(painter, &orange, st.marking);
+            let black = head_patch(
+                277.0,
+                368.0,
+                &[(24.0, 11.0), (9.0, 6.0), (3.5, -6.0), (5.0, -22.0)],
+            );
+            fill_smooth_polygon(painter, &black, st.accent);
+        }
+        PetKind::Dog => {
+            fill_smooth_polygon(painter, &oval(0.0, 16.0, 17.5, 13.5), st.marking);
+        }
+        PetKind::Capybara => {
+            // The famous tangerine balanced on its flat head
+            let wobble = (cat.time * 2.2).sin() * 0.6 + cat.typing_bob * 0.25;
+            let (tx, ty) = (-6.0 + wobble, -39.5);
+            fill_smooth_polygon(painter, &oval(tx, ty, 8.6, 7.8), st.accent);
+            let leaf = vec![
+                rot(tx + 0.5, ty - 7.5),
+                rot(tx + 4.0, ty - 12.5),
+                rot(tx + 8.0, ty - 10.5),
+                rot(tx + 4.5, ty - 7.0),
+            ];
+            fill_smooth_polygon(painter, &leaf, Color32::from_rgb(92, 150, 60));
+            painter.line_segment(
+                [rot(tx, ty - 7.0), rot(tx - 0.4, ty - 9.5)],
+                Stroke::new(tf.s(1.4), Color32::from_rgb(96, 70, 40)),
+            );
+        }
+    }
+}
+
+fn draw_face(painter: &Painter, tf: &CanvasTransform, cat: &CatState, st: &PetStyle) {
+    let head_center = cat.head_center();
     let tilt = cat.head_tilt;
     // Slight pseudo-3D yaw shift of face features toward gaze
-    let face_shift_x = cat.gaze[0] * 5.2;
-    let face_shift_y = cat.gaze[1] * 2.8;
+    // (side-view heads barely shift: their features sit on a snout, not a flat face)
+    let profile = matches!(st.species, Species::Capybara | Species::Dino);
+    let shift = if profile { 0.25 } else { 1.0 };
+    let face_shift_x = cat.gaze[0] * 5.0 * shift;
+    let face_shift_y = cat.gaze[1] * 2.8 * shift;
 
     let rot = |dx: f32, dy: f32| -> Pos2 {
         let c = tilt.cos();
@@ -293,89 +839,308 @@ fn draw_face(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
         let y = dy + face_shift_y;
         tf.pt(head_center[0] + x * c - y * s, head_center[1] + x * s + y * c)
     };
+    let oval = |cx: f32, cy: f32, rx: f32, ry: f32, n: usize| -> Vec<Pos2> {
+        (0..n)
+            .map(|i| {
+                let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+                rot(cx + a.cos() * rx, cy + a.sin() * ry)
+            })
+            .collect()
+    };
 
-    // Eye openness: 1.0 = wide open luminous ovals, 0.0 = closed blink, ~0.16 = happy petted horizontal slits!
+    // Eye openness: 1.0 = wide open, 0.0 = closed blink, ~0.16 = happy petted slits
     let squint = cat.pet_level;
     let open_factor = ((1.0 - squint * 0.84) * (1.0 - cat.blink)).max(0.0);
 
-    for side in [-1.0_f32, 1.0_f32] {
-        let ex = side * 16.5;
-        let ey = -4.5;
+    // (eye index, side sign, x, y) — side-view heads show a single eye
+    let eyes: Vec<(usize, f32, f32, f32)> = match st.species {
+        Species::Cat => vec![(0, -1.0, -17.5, -3.5), (1, 1.0, 17.5, -3.5)],
+        Species::Dog => vec![(0, -1.0, -15.5, -6.0), (1, 1.0, 15.5, -6.0)],
+        Species::Capybara => vec![(0, -1.0, 3.0, -12.0)],
+        Species::Dino => vec![(0, -1.0, -6.0, -13.0)],
+        Species::Alien => vec![(0, -1.0, -17.5, -3.0), (1, 1.0, 17.5, -3.0)],
+    };
+
+    for (idx, side, ex, ey) in eyes {
+        let closed_col = st.eye_closed[idx];
+
+        if st.species == Species::Alien {
+            // Huge glossy almond eyes, slanted up at the outer corners
+            let slant = side * 0.42;
+            let (sc, ss) = (slant.cos(), slant.sin());
+            let cx = ex + cat.gaze[0] * 1.4;
+            let cy = ey + cat.gaze[1] * 1.0;
+            let almond = |rx: f32, ry: f32, ox: f32, oy: f32, n: usize| -> Vec<Pos2> {
+                (0..n)
+                    .map(|i| {
+                        let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+                        let (x, y) = (ox + a.cos() * rx, oy + a.sin() * ry);
+                        rot(cx + x * sc - y * ss, cy + x * ss + y * sc)
+                    })
+                    .collect()
+            };
+            if open_factor < 0.12 || squint > 0.45 {
+                let lift = if squint > 0.45 { 3.2 } else { 0.5 };
+                let arc: Vec<Pos2> = (0..=8)
+                    .map(|i| {
+                        let t = i as f32 / 8.0 * 2.0 - 1.0;
+                        let (x, y) = (t * 12.0, 1.0 - (1.0 - t * t) * lift);
+                        rot(cx + x * sc - y * ss, cy + x * ss + y * sc)
+                    })
+                    .collect();
+                painter.add(Shape::Path(PathShape::line(arc, Stroke::new(tf.s(2.2), closed_col))));
+            } else {
+                let open = open_factor * (1.0 - cat.drowsy * 0.45);
+                fill_smooth_polygon(painter, &almond(13.5, 9.6 * open, 0.0, 0.0, 26), st.eye);
+                if open > 0.45 {
+                    let gx = cat.gaze[0] * 3.0;
+                    let gy = cat.gaze[1] * 2.0;
+                    let white = Color32::from_rgb(250, 252, 255);
+                    fill_smooth_polygon(painter, &almond(3.4, 2.6 * open, -4.0 + gx, -3.0 * open + gy, 12), white);
+                    fill_smooth_polygon(
+                        painter,
+                        &almond(1.5, 1.2, 4.5 + gx, 2.6 * open + gy, 8),
+                        Color32::from_rgba_unmultiplied(250, 252, 255, 150),
+                    );
+                }
+            }
+            continue;
+        }
+
+        if matches!(st.species, Species::Dog | Species::Capybara) {
+            // Friendly round button eyes with a little glint
+            let r = match st.species {
+                Species::Dog => 6.4,
+                _ => 5.0,
+            };
+            if open_factor < 0.12 || squint > 0.45 {
+                // Blink, or a happy upward arc while being petted
+                let lift = if squint > 0.45 { 2.6 } else { 0.4 };
+                let arc: Vec<Pos2> = (0..=8)
+                    .map(|i| {
+                        let t = i as f32 / 8.0 * 2.0 - 1.0;
+                        rot(ex + t * (r + 0.8), ey + 1.0 - (1.0 - t * t) * lift)
+                    })
+                    .collect();
+                painter.add(Shape::Path(PathShape::line(
+                    arc,
+                    Stroke::new(tf.s(2.0), closed_col),
+                )));
+            } else {
+                let open = open_factor * (1.0 - cat.drowsy * 0.45);
+                let gx = cat.gaze[0] * 1.6;
+                let gy = cat.gaze[1] * 1.3;
+                fill_smooth_polygon(painter, &oval(ex + gx, ey + gy, r, r * open, 20), st.eye);
+                if open > 0.5 {
+                    let glint = oval(
+                        ex + gx - 1.8 + cat.gaze[0] * 0.8,
+                        ey + gy - 2.0 * open,
+                        r * 0.3,
+                        r * 0.3,
+                        10,
+                    );
+                    fill_smooth_polygon(painter, &glint, Color32::from_rgb(250, 250, 246));
+                }
+                if st.species == Species::Capybara {
+                    // Permanently unbothered: a heavy lid rests over the top of each eye
+                    let (cx, cy) = (ex + gx, ey + gy);
+                    let lid_y = cy - r * 0.2;
+                    let lid = vec![
+                        rot(cx - r - 2.0, cy - r - 2.0),
+                        rot(cx + r + 2.0, cy - r - 2.0),
+                        rot(cx + r + 2.0, lid_y),
+                        rot(cx - r - 2.0, lid_y),
+                    ];
+                    fill_smooth_polygon(painter, &lid, st.lids[idx]);
+                    painter.line_segment(
+                        [
+                            rot(cx - r - 2.0, lid_y),
+                            rot(cx + r + 2.0, lid_y),
+                        ],
+                        Stroke::new(tf.s(1.5), closed_col),
+                    );
+                }
+            }
+            continue;
+        }
 
         if open_factor < 0.06 {
             // Closed blink line
-            let p0 = rot(ex - 10.0, ey + 1.0);
-            let p1 = rot(ex + 10.0, ey + 1.0);
-            painter.line_segment([p0, p1], Stroke::new(tf.s(1.6), EYE_LIME));
+            let hw = if st.species == Species::Dino { 8.0 } else { 10.5 };
+            let p0 = rot(ex - hw, ey + 1.0);
+            let p1 = rot(ex + hw, ey + 1.0);
+            painter.line_segment([p0, p1], Stroke::new(tf.s(1.7), closed_col));
         } else if squint > 0.45 && cat.blink < 0.5 {
-            // Iconic blissful horizontal chartreuse slits (frame_02.png!)
-            let half_w = 11.5;
-            let half_h = (2.1 + (1.0 - squint) * 7.5) * (1.0 - cat.blink);
+            // Blissful slits, gently arched like a smile
+            let half_w = if st.species == Species::Dino { 9.0 } else { 12.0 };
+            let half_h = (1.9 + (1.0 - squint) * 7.5) * (1.0 - cat.blink);
             let mut slit = Vec::with_capacity(20);
             for i in 0..20 {
                 let a = (i as f32 / 20.0) * std::f32::consts::TAU;
-                // Slight serene droop/smile arc
-                let arc = (a.cos() * a.cos()) * -1.1 * squint;
-                slit.push(rot(ex + a.cos() * half_w, ey + 2.0 + a.sin() * half_h + arc));
+                let arc = (a.cos() * a.cos()) * 1.6 * squint;
+                slit.push(rot(ex + a.cos() * half_w, ey + 1.0 + a.sin() * half_h + arc));
             }
-            fill_smooth_polygon(painter, &slit, EYE_LIME);
+            fill_smooth_polygon(painter, &slit, closed_col);
         } else {
-            // Big luminous yellow-green cat eyes with expressive tracking vertical oval pupils!
-            let rx = 12.2;
-            let ry = 11.0 * open_factor;
+            // Big luminous eyes with tracking vertical oval pupils
+            let dino = st.species == Species::Dino;
+            let rx = if dino { 9.2 } else { 12.8 };
+            let ry = if dino { 10.2 } else { 11.8 } * open_factor;
+            let ring = if st.dark_face { 0.9 } else { 1.5 };
 
-            // Soft outer iris rim
-            let mut glow = Vec::with_capacity(24);
-            for i in 0..24 {
-                let a = (i as f32 / 24.0) * std::f32::consts::TAU;
-                glow.push(rot(ex + a.cos() * (rx + 0.9), ey + a.sin() * (ry + 0.9)));
-            }
-            fill_smooth_polygon(painter, &glow, EYE_GLOW);
+            fill_smooth_polygon(painter, &oval(ex, ey, rx + ring, ry + ring, 28), st.eye_ring);
+            fill_smooth_polygon(painter, &oval(ex, ey, rx, ry, 28), st.eye);
 
-            let mut iris = Vec::with_capacity(24);
-            for i in 0..24 {
-                let a = (i as f32 / 24.0) * std::f32::consts::TAU;
-                iris.push(rot(ex + a.cos() * rx, ey + a.sin() * ry));
-            }
-            fill_smooth_polygon(painter, &iris, EYE_LIME);
-
-            // Bold black vertical oval pupil with generous tracking travel clamped cleanly inside the iris
-            let prx = 4.1;
-            let pry = (6.8 * open_factor).min(ry - 1.2).max(1.5);
+            // Pupil: dilates when excited, clamped cleanly inside the iris
+            let (pw, ph) = if dino { (4.6, 5.2) } else { (4.3, 7.4) };
+            let prx = (pw * cat.pupil).min(rx - 3.0);
+            let pry = (ph * cat.pupil * open_factor).min(ry - 1.2).max(1.5);
             let max_dx = (rx - prx - 0.8).max(1.0);
             let max_dy = (ry - pry - 0.6).max(0.8);
             let mut gx = cat.gaze[0] * max_dx;
             let mut gy = cat.gaze[1] * max_dy;
-            // Clamp pupil offset inside the allowed inner ellipse
             let norm_dist = ((gx / max_dx).powi(2) + (gy / max_dy).powi(2)).sqrt();
             if norm_dist > 1.0 {
                 gx /= norm_dist;
                 gy /= norm_dist;
             }
-            let px = ex + gx;
-            let py = ey + gy;
-            let mut pupil = Vec::with_capacity(20);
-            for i in 0..20 {
-                let a = (i as f32 / 20.0) * std::f32::consts::TAU;
-                pupil.push(rot(px + a.cos() * prx, py + a.sin() * pry));
+            fill_smooth_polygon(painter, &oval(ex + gx, ey + gy, prx, pry, 20), st.pupil);
+
+            // Sleepy eyelid: a fur-colored lid simply slides down over the eye
+            if cat.drowsy > 0.02 {
+                let lid_y = ey - ry - 1.5 + (2.0 * ry + 1.5) * 0.48 * cat.drowsy;
+                let lid = vec![
+                    rot(ex - rx - 2.0, ey - ry - 3.0),
+                    rot(ex + rx + 2.0, ey - ry - 3.0),
+                    rot(ex + rx + 2.0, lid_y - side * 0.8),
+                    rot(ex - rx - 2.0, lid_y + side * 0.8),
+                ];
+                fill_smooth_polygon(painter, &lid, st.lids[idx]);
             }
-            fill_smooth_polygon(painter, &pupil, PUPIL_BLACK);
         }
     }
 
-    // 3 short delicate white whiskers on each cheek (matching frame_01..05)
-    let whisker_stroke = Stroke::new(tf.s(1.25), CAT_WHISKER);
-    for side in [-1.0_f32, 1.0_f32] {
-        let base_x = side * 21.5;
-        let specs = [
-            (10.0_f32, 0.0_f32, 10.5_f32, -0.5_f32),
-            (13.5, 0.5, 11.2, 2.2),
-            (17.0, 0.0, 10.2, 4.8),
-        ];
-        for (by, dx0, len, dy1) in specs {
-            let p0 = rot(base_x + side * dx0, by);
-            let p1 = rot(base_x + side * (dx0 + len), by + dy1);
-            painter.line_segment([p0, p1], whisker_stroke);
+    // Nose + mouth (the all-black cat keeps its minimalist face)
+    let quad = |p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)| -> Vec<Pos2> {
+        (0..=8)
+            .map(|i| {
+                let t = i as f32 / 8.0;
+                let u = 1.0 - t;
+                rot(
+                    u * u * p0.0 + 2.0 * u * t * p1.0 + t * t * p2.0,
+                    u * u * p0.1 + 2.0 * u * t * p1.1 + t * t * p2.1,
+                )
+            })
+            .collect()
+    };
+    match st.species {
+        Species::Cat => {
+            if let Some(mouth) = st.mouth {
+                let stroke = Stroke::new(tf.s(1.2), mouth);
+                painter.line_segment([rot(0.0, 12.0), rot(0.0, 14.8)], stroke);
+                for side in [-1.0_f32, 1.0] {
+                    let curve = quad((0.0, 14.8), (side * 2.6, 18.2), (side * 5.6, 15.2));
+                    painter.add(Shape::Path(PathShape::line(curve, stroke)));
+                }
+            }
+            if let Some(nose) = st.nose {
+                let tri = vec![rot(-3.4, 8.6), rot(3.4, 8.6), rot(0.0, 12.4)];
+                fill_smooth_polygon(painter, &tri, nose);
+            }
+        }
+        Species::Dog => {
+            let happy = cat.typing_energy.min(1.0).max(cat.pet_level);
+            // Panting tongue pops out when the dog is excited or being petted
+            if happy > 0.25 {
+                let len = 3.0 + 5.5 * ((happy - 0.25) / 0.75).min(1.0)
+                    + (cat.time * 9.0).sin() * 0.6;
+                fill_smooth_polygon(painter, &oval(0.0, 19.0 + len * 0.5, 4.2, len, 14), st.accent);
+            }
+            if let Some(mouth) = st.mouth {
+                let stroke = Stroke::new(tf.s(1.4), mouth);
+                painter.line_segment([rot(0.0, 11.0), rot(0.0, 16.0)], stroke);
+                for side in [-1.0_f32, 1.0] {
+                    let curve = quad((0.0, 16.0), (side * 4.0, 21.5), (side * 9.0, 17.0));
+                    painter.add(Shape::Path(PathShape::line(curve, stroke)));
+                }
+            }
+            if let Some(nose) = st.nose {
+                fill_smooth_polygon(painter, &oval(0.0, 8.4, 6.2, 4.4, 18), nose);
+                let shine = oval(-1.8, 7.0, 1.7, 1.0, 10);
+                fill_smooth_polygon(painter, &shine, Color32::from_rgb(120, 112, 112));
+            }
+        }
+        Species::Alien => {
+            if let Some(nose) = st.nose {
+                for side in [-1.0_f32, 1.0] {
+                    fill_smooth_polygon(painter, &oval(side * 2.2, 13.5, 0.9, 1.4, 8), nose);
+                }
+            }
+            if let Some(mouth) = st.mouth {
+                let smile = quad((-4.5, 20.0), (0.0, 23.5), (4.5, 20.0));
+                painter.add(Shape::Path(PathShape::line(smile, Stroke::new(tf.s(1.4), mouth))));
+            }
+        }
+        Species::Dino => {
+            if let Some(nose) = st.nose {
+                fill_smooth_polygon(painter, &oval(-45.0, -3.0, 1.9, 2.6, 10), nose);
+            }
+            if let Some(mouth) = st.mouth {
+                // Long toothy grin running the whole length of the snout
+                let grin = quad((-52.0, 10.0), (-30.0, 20.0), (-3.0, 13.0));
+                for i in 1..8usize {
+                    let along = (grin[i + 1] - grin[i - 1]).normalized();
+                    let mut down = Vec2::new(-along.y, along.x);
+                    if down.y < 0.0 {
+                        down = -down;
+                    }
+                    let tooth = vec![
+                        grin[i] - along * tf.s(2.2),
+                        grin[i] + along * tf.s(2.2),
+                        grin[i] + down * tf.s(4.2),
+                    ];
+                    fill_smooth_polygon(painter, &tooth, Color32::from_rgb(252, 252, 244));
+                }
+                let stroke = Stroke::new(tf.s(1.7), mouth);
+                painter.add(Shape::Path(PathShape::line(grin, stroke)));
+                // Smile curl at the corner of the mouth
+                let curl = quad((-3.0, 13.0), (1.5, 11.5), (2.5, 7.0));
+                painter.add(Shape::Path(PathShape::line(curl, stroke)));
+            }
+            let blush = oval(9.0, 7.0, 5.0, 3.2, 12);
+            fill_smooth_polygon(painter, &blush, Color32::from_rgba_unmultiplied(240, 130, 120, 110));
+        }
+        Species::Capybara => {
+            if let Some(nose) = st.nose {
+                // Nostril high on the blunt front of the muzzle
+                fill_smooth_polygon(painter, &oval(-46.0, -10.0, 2.3, 3.6, 12), nose);
+            }
+            if let Some(mouth) = st.mouth {
+                let stroke = Stroke::new(tf.s(1.5), mouth);
+                let line = quad((-51.5, 11.0), (-42.0, 17.5), (-29.0, 14.0));
+                painter.add(Shape::Path(PathShape::line(line, stroke)));
+            }
+            let blush = oval(-12.0, 6.0, 5.0, 3.0, 12);
+            fill_smooth_polygon(painter, &blush, Color32::from_rgba_unmultiplied(226, 120, 96, 80));
+        }
+    }
+
+    // 3 short delicate whiskers on each cheek, fanning out past the cheek edge
+    if let Some(whisker) = st.whisker {
+        let whisker_stroke = Stroke::new(tf.s(1.2), with_alpha(whisker, 0.9));
+        let quiver = (cat.time * 31.0).sin() * 0.5 * cat.typing_energy.min(1.0);
+        for side in [-1.0_f32, 1.0_f32] {
+            let base_x = side * 24.0;
+            let specs = [
+                (10.5_f32, 0.0_f32, 11.5_f32, -1.6_f32),
+                (14.2, 0.6, 12.5, 1.4),
+                (17.8, 0.0, 11.0, 4.6),
+            ];
+            for (by, dx0, len, dy1) in specs {
+                let p0 = rot(base_x + side * dx0, by);
+                let p1 = rot(base_x + side * (dx0 + len), by + dy1 + quiver);
+                painter.line_segment([p0, p1], whisker_stroke);
+            }
         }
     }
 }
@@ -383,7 +1148,8 @@ fn draw_face(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
 fn draw_mouse(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
     let m = cat.mouse_current_pos();
     let tilt = cat.mouse_tilt;
-    let body_color = lerp_color(MOUSE_WHITE, MOUSE_LIME, cat.mouse_click_glow);
+    let glow = cat.mouse_click_glow;
+    let press = cat.mouse_press;
 
     let rot = |dx: f32, dy: f32, y_off: f32| -> Pos2 {
         let c = tilt.cos();
@@ -391,57 +1157,79 @@ fn draw_mouse(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
         tf.pt(m[0] + dx * c - dy * s, m[1] + y_off + dx * s + dy * c)
     };
 
-    let sample_rot_ellipse = |rx: f32, ry: f32, y_off: f32| -> Vec<Pos2> {
-        (0..24)
+    // Small egg-shaped mouse seen from the front: palm rest under the paw (top), buttons and
+    // wheel pointing down toward the viewer — the pet faces us, so its mouse does too
+    const RX: f32 = 13.4;
+    const RY: f32 = 15.4;
+    let egg = |a: f32, grow: f32| -> (f32, f32) {
+        let narrow = 1.0 - 0.13 * a.sin().max(0.0);
+        (a.cos() * (RX + grow) * narrow, a.sin() * (RY + grow))
+    };
+    let sample_egg = |a0: f32, a1: f32, n: usize, grow: f32, y_off: f32| -> Vec<Pos2> {
+        (0..n)
             .map(|i| {
-                let a = (i as f32 / 24.0) * std::f32::consts::TAU;
-                rot(a.cos() * rx, a.sin() * ry, y_off)
+                let a = a0 + (a1 - a0) * (i as f32 / n as f32);
+                let (x, y) = egg(a, grow);
+                rot(x, y, y_off)
             })
             .collect()
     };
+    let tau = std::f32::consts::TAU;
+    let pi = std::f32::consts::PI;
 
-    // Subtle 3D bottom lip
-    let lip = sample_rot_ellipse(16.5, 19.0, 2.5);
-    fill_smooth_polygon(painter, &lip, Color32::from_rgb(198, 200, 194));
+    // 3D bottom lip (gets thinner while a button is held down)
+    let lip = sample_egg(0.0, tau, 28, 0.3, 2.8);
+    fill_smooth_polygon(painter, &lip, Color32::from_rgb(196, 198, 192));
 
-    // Main oval white/lime mouse body
-    let body = sample_rot_ellipse(16.2, 18.5, 0.0);
-    fill_smooth_polygon(painter, &body, body_color);
+    // Main shell sinks a hair on click
+    let sink = press * 1.3;
+    let whole_lime = if cat.mouse_click_side < 0 { glow } else { glow * 0.18 };
+    let body = sample_egg(0.0, tau, 28, 0.0, sink);
+    fill_smooth_polygon(painter, &body, lerp_color(MOUSE_WHITE, MOUSE_LIME, whole_lime));
+
+    // Right click lights only the pet's right button — on the viewer's left, like the keyboard
+    if cat.mouse_click_side > 0 && glow > 0.02 {
+        let mut half = sample_egg(pi * 0.5, pi * 1.02, 12, -0.4, sink);
+        half.push(rot(0.0, -0.8, sink));
+        fill_smooth_polygon(painter, &half, lerp_color(MOUSE_WHITE, MOUSE_LIME, glow));
+    }
+
     painter.add(Shape::Path(PathShape::closed_line(
         body,
         Stroke::new(tf.s(1.5), MOUSE_OUTLINE),
     )));
 
-    // Tiny orange/amber scroll wheel slit near top-center (clearly visible in frame_01/03!)
-    let w0 = rot(0.5, -7.5, 0.0);
-    let w1 = rot(-0.5, -1.5, 0.0);
-    let wheel_col = if cat.mouse_click_glow > 0.3 {
+    // Button split seam
+    let seam = Color32::from_rgba_unmultiplied(32, 32, 36, 70);
+    painter.line_segment(
+        [rot(0.0, RY - 1.0, sink), rot(0.0, 11.0, sink)],
+        Stroke::new(tf.s(1.0), seam),
+    );
+    painter.line_segment(
+        [rot(0.0, 4.0, sink), rot(0.0, -0.5, sink)],
+        Stroke::new(tf.s(1.0), seam),
+    );
+
+    // Amber scroll wheel (flashes lime on middle click)
+    let wheel_col = if cat.mouse_click_side == 0 {
+        lerp_color(MOUSE_WHEEL, KEY_LIME_SIDE, glow)
+    } else if cat.mouse_click_side < 0 && glow > 0.3 {
         Color32::from_rgb(42, 48, 22)
     } else {
         MOUSE_WHEEL
     };
-    painter.line_segment([w0, w1], Stroke::new(tf.s(2.1), wheel_col));
+    painter.line_segment(
+        [rot(0.0, 10.0, sink), rot(0.0, 5.0, sink)],
+        Stroke::new(tf.s(2.4), wheel_col),
+    );
 }
 
 fn draw_keyboard(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
-    // 1. Dark mechanical keyboard base / bezel with 3D front lip
-    let case_bottom = vec![
-        tf.pt(90.0, 234.0),
-        tf.pt(300.0, 234.0),
-        tf.pt(313.0, 297.0),
-        tf.pt(311.0, 303.0),
-        tf.pt(79.0, 303.0),
-        tf.pt(77.0, 297.0),
-    ];
-    fill_smooth_polygon(painter, &case_bottom, KBD_CASE_SHADOW);
-
-    let case_top = vec![
-        tf.pt(92.0, 231.0),
-        tf.pt(298.0, 231.0),
-        tf.pt(312.0, 296.0),
-        tf.pt(78.0, 296.0),
-    ];
-    fill_smooth_polygon(painter, &case_top, KBD_CASE);
+    // 1. Dark mechanical keyboard case: rounded top plate over a chunky front lip
+    let plate = [[91.0, 229.5], [299.0, 229.5], [313.5, 297.5], [76.5, 297.5]];
+    let lip: Vec<[f32; 2]> = plate.iter().map(|p| [p[0], p[1] + 6.5]).collect();
+    fill_smooth_polygon(painter, &rounded_polygon(tf, &lip, 6.0), KBD_CASE_SHADOW);
+    fill_smooth_polygon(painter, &rounded_polygon(tf, &plate, 6.0), KBD_CASE);
 
     // 2. Individual 3D perspective keycaps (5 rows, 180-degree rotated to face the cat!)
     let pad_u = 0.0045;
@@ -449,7 +1237,10 @@ fn draw_keyboard(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
 
     for spec in &cat.layout.keys {
         let heat = cat.key_heat.get(&spec.key).copied().unwrap_or(0.0);
-        let depress = heat * 2.2;
+        let press = cat.key_press.get(&spec.key).copied().unwrap_or(0.0);
+        let depress = press * 2.3;
+        // Ease the lime so it lingers bright, then melts away
+        let tint = heat * heat * (3.0 - 2.0 * heat);
 
         let u0 = spec.u_start + pad_u;
         let u1 = spec.u_start + spec.u_width - pad_u;
@@ -464,20 +1255,20 @@ fn draw_keyboard(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
             KeyAccent::White => KEY_WHITE_SIDE,
             KeyAccent::Orange => KEY_ORANGE_SIDE,
         };
-        let top_col = lerp_color(base_top_col, KEY_LIME, heat);
-        let side_col = lerp_color(base_side_col, KEY_LIME_SIDE, heat);
+        let top_col = lerp_color(base_top_col, KEY_LIME, tint);
+        let side_col = lerp_color(base_side_col, KEY_LIME_SIDE, tint);
 
         let tl = CatState::keyboard_uv_to_canvas(u0, v0);
         let tr = CatState::keyboard_uv_to_canvas(u1, v0);
         let br = CatState::keyboard_uv_to_canvas(u1, v1);
         let bl = CatState::keyboard_uv_to_canvas(u0, v1);
 
-        // Keycap bottom 3D skirt
+        // Keycap front skirt (shrinks as the cap travels down)
         let skirt = vec![
             tf.pt(bl[0], bl[1] - 0.5 + depress * 0.5),
             tf.pt(br[0], br[1] - 0.5 + depress * 0.5),
-            tf.pt(br[0], br[1] + 2.4),
-            tf.pt(bl[0], bl[1] + 2.4),
+            tf.pt(br[0], br[1] + 2.5),
+            tf.pt(bl[0], bl[1] + 2.5),
         ];
         fill_smooth_polygon(painter, &skirt, side_col);
 
@@ -492,12 +1283,12 @@ fn draw_keyboard(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
     }
 }
 
-fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
+fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState, st: &PetStyle) {
     let t = ease_out_cubic(cat.cover_blend.clamp(0.0, 1.0));
     let lx = cat.lean_x;
     let bob = cat.typing_bob;
     let tilt = cat.head_tilt;
-    let head_center = [182.0 + lx, 108.0 + bob];
+    let head_center = cat.head_center();
     let shy_press = (cat.time * 24.0).sin() * 1.4 * cat.shy_wiggle;
 
     let rot_head = |dx: f32, dy: f32| -> [f32; 2] {
@@ -514,7 +1305,12 @@ fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
         let paw_state = if is_left { &cat.left_paw } else { &cat.right_paw };
 
         // Target sits squarely over each bright chartreuse eye!
-        let eye_target = rot_head(side * 16.5, -3.5 + shy_press * side);
+        let eye_target = match st.species {
+            // Side-view heads have one eye: both paws pile up over it
+            Species::Dino => rot_head(-6.0 + side * 9.0, -11.0 + shy_press * side),
+            Species::Capybara => rot_head(3.0 + side * 9.0, -10.0 + shy_press * side),
+            _ => rot_head(side * 16.5, -3.5 + shy_press * side),
+        };
         let start = paw_state.pos;
         let tip = [
             start[0] + (eye_target[0] - start[0]) * t,
@@ -541,11 +1337,11 @@ fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
         );
 
         // Solid sleek black raised arm
-        draw_thick_round_polyline(painter, &arm_pts, tf.s(16.0), CAT_BLACK);
+        draw_tapered_limb(painter, &arm_pts, tf.s(19.0), tf.s(15.0), st.body);
 
         // Delicate pale rim outlines along the raised forearm so the silhouette reads crisply against the black torso/head!
         let rim_alpha = (t * 215.0).round() as u8;
-        let rim_col = Color32::from_rgba_unmultiplied(218, 222, 216, rim_alpha);
+        let rim_col = Color32::from_rgba_unmultiplied(st.rim.r(), st.rim.g(), st.rim.b(), rim_alpha);
         let rim_stroke = Stroke::new(tf.s(1.35), rim_col);
         if arm_pts.len() >= 6 {
             let mut inner_edge = Vec::new();
@@ -582,7 +1378,7 @@ fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
                 tf.pt(tip[0] + dx * c - dy * s, tip[1] + dx * s + dy * c)
             })
             .collect();
-        fill_smooth_polygon(painter, &paw_pts, CAT_BLACK);
+        fill_smooth_polygon(painter, &paw_pts, st.paw);
 
         // Crisp cute pale contour arc around the paw top + two tiny toe-bean divider ticks!
         let mut paw_arc = Vec::with_capacity(18);
@@ -618,81 +1414,45 @@ fn draw_covering_paws(painter: &Painter, tf: &CanvasTransform, cat: &CatState) {
     }
 }
 
-fn draw_paw(painter: &Painter, tf: &CanvasTransform, cat: &CatState, paw: &PawState, is_left: bool) {
+/// Half-width of a front limb at parameter t in [0..1] (shoulder -> wrist), in canvas units.
+fn limb_half_width(t: f32, w0: f32, w1: f32) -> f32 {
+    let e = t * t * (3.0 - 2.0 * t);
+    0.5 * (w0 + (w1 - w0) * e)
+}
+
+/// One continuous front limb for every pose (resting leg, tucked paw, reaching arm), so the
+/// cat flows between poses instead of popping from one drawing to another.
+fn draw_paw(
+    painter: &Painter,
+    tf: &CanvasTransform,
+    cat: &CatState,
+    st: &PetStyle,
+    paw: &PawState,
+    is_left: bool,
+) {
     let side = if is_left { -1.0_f32 } else { 1.0_f32 };
     let lx = cat.lean_x;
+    let dy = cat.head_center()[1] - 108.0;
+    let rest = {
+        let r = paw.rest_blend.clamp(0.0, 1.0);
+        r * r * (3.0 - 2.0 * r)
+    };
+    let curl = paw.curl_blend.clamp(0.0, 1.0);
 
-    // 1. Resting straight vertical front leg (like frame_01.png!)
-    if paw.rest_blend > 0.75 && paw.mode == PawMode::Resting {
-        let top_x = 182.0 + lx * 0.45 + side * 18.5;
-        let top_y = 176.0;
-        let bot_x = paw.pos[0];
-        let bot_y = paw.pos[1];
+    // Shoulder slides from the chest (reaching) down to the leg root (sitting)
+    let sh_reach = [182.0 + lx * 0.72 + side * 23.0, 159.0 + dy * 0.5];
+    let sh_rest = [182.0 + lx * 0.42 + side * 19.0, 172.0];
+    let shoulder = [
+        sh_reach[0] + (sh_rest[0] - sh_reach[0]) * rest,
+        sh_reach[1] + (sh_rest[1] - sh_reach[1]) * rest,
+    ];
+    let tip = [paw.pos[0], paw.pos[1] - paw.total_lift()];
 
-        let leg = vec![
-            tf.pt(top_x - 7.5, top_y),
-            tf.pt(top_x + 7.5, top_y),
-            tf.pt(bot_x + 8.0, bot_y),
-            tf.pt(bot_x - 8.0, bot_y),
-        ];
-        fill_smooth_polygon(painter, &leg, CAT_BLACK);
-        painter.circle_filled(tf.pt(bot_x, bot_y - 1.0), tf.s(8.5), CAT_BLACK);
-
-        // Iconic thin pale-white slightly curved edge lines separating legs from black body (frame_01.png!)
-        let alpha = ((paw.rest_blend - 0.5) * 2.0).clamp(0.0, 1.0);
-        let rim = Color32::from_rgba_unmultiplied(218, 222, 216, (alpha * 215.0) as u8);
-        let stroke = Stroke::new(tf.s(1.3), rim);
-        let outer_curve = sample_cubic_bezier(
-            tf.pt(top_x + side * 8.2, top_y + 2.0),
-            tf.pt(top_x + side * 9.0, (top_y + bot_y) * 0.5),
-            tf.pt(bot_x + side * 8.5, bot_y - 14.0),
-            tf.pt(bot_x + side * 8.0, bot_y - 4.0),
-            8,
-        );
-        let inner_curve = sample_cubic_bezier(
-            tf.pt(top_x - side * 8.0, top_y + 4.0),
-            tf.pt(top_x - side * 7.2, (top_y + bot_y) * 0.5),
-            tf.pt(bot_x - side * 8.0, bot_y - 14.0),
-            tf.pt(bot_x - side * 8.0, bot_y - 4.0),
-            8,
-        );
-        painter.add(Shape::Path(PathShape::line(outer_curve, stroke)));
-        painter.add(Shape::Path(PathShape::line(inner_curve, stroke)));
-        return;
-    }
-
-    // 2. Curled-up cute chest paw while typing fast (like frame_03.png!)
-    if paw.curl_blend > 0.55 {
-        let cx = paw.pos[0] + lx * 0.35;
-        let cy = paw.pos[1];
-        let paw_oval = sample_ellipse(tf.pt(cx, cy), tf.s(11.5), tf.s(10.0), 20);
-        fill_smooth_polygon(painter, &paw_oval, CAT_BLACK);
-
-        // Cute U-shaped pale white contour underneath the curled paw (frame_03.png!)
-        let mut arc = Vec::with_capacity(14);
-        for i in 0..=12 {
-            let t = i as f32 / 12.0;
-            let ang = std::f32::consts::PI * (0.08 + t * 0.84);
-            arc.push(tf.pt(cx + ang.cos() * 11.8, cy + ang.sin() * 10.2));
-        }
-        let alpha = (paw.curl_blend * 230.0) as u8;
-        painter.add(Shape::Path(PathShape::line(
-            arc,
-            Stroke::new(
-                tf.s(1.5),
-                Color32::from_rgba_unmultiplied(222, 226, 220, alpha),
-            ),
-        )));
-        return;
-    }
-
-    // 3. Articulated reaching arm (Mouse or PressingKey — frame_02.png, frame_04.png, frame_05.png!)
-    let shoulder = [182.0 + lx * 0.72 + side * 22.0, 158.0 + cat.typing_bob * 0.4];
-    let tip = [paw.pos[0], paw.pos[1] - paw.lift];
-
-    // Natural slight outward elbow curve
-    let mid_x = (shoulder[0] + tip[0]) * 0.5 + side * 6.0;
-    let mid_y = (shoulder[1] + tip[1]) * 0.5 - 3.0;
+    // Natural slight outward elbow bend that straightens out for short limbs
+    let len = ((tip[0] - shoulder[0]).powi(2) + (tip[1] - shoulder[1]).powi(2)).sqrt();
+    let bend = (1.0 - rest) * (len / 70.0).min(1.0);
+    let mid_x = (shoulder[0] + tip[0]) * 0.5 + side * 6.5 * bend;
+    let mid_y = (shoulder[1] + tip[1]) * 0.5 - 3.5 * bend;
     let ctrl1 = [
         shoulder[0] + (mid_x - shoulder[0]) * 0.65,
         shoulder[1] + (mid_y - shoulder[1]) * 0.65,
@@ -710,52 +1470,159 @@ fn draw_paw(painter: &Painter, tf: &CanvasTransform, cat: &CatState, paw: &PawSt
         18,
     );
 
-    // Solid sleek black arm + round paw pad
-    draw_thick_round_polyline(painter, &arm_pts, tf.s(15.5), CAT_BLACK);
-    painter.circle_filled(tf.pt(tip[0], tip[1]), tf.s(10.2), CAT_BLACK);
+    // Thick at the shoulder, slimmer at the wrist, ending in a plump round paw
+    let w0 = 21.0 - 4.0 * rest;
+    let w1 = 14.5;
+    draw_tapered_limb(painter, &arm_pts, tf.s(w0), tf.s(w1), st.body);
+    if cat.pet == PetKind::Siamese {
+        // Dark "gloves" fading up the forelegs
+        draw_limb_range(painter, &arm_pts, tf.s(w0), tf.s(w1), 13, 18, st.paw, true);
+    }
+    if cat.pet == PetKind::Bengal {
+        for (i0, i1) in [(8, 9), (12, 13)] {
+            draw_limb_range(painter, &arm_pts, tf.s(w0), tf.s(w1), i0, i1, st.marking, false);
+        }
+    }
 
-    // Subtle pale rim highlight ONLY where the arm overlaps the dark torso (never floating in air!)
-    draw_arm_rim_highlights(painter, tf, cat, &arm_pts, tf.s(8.0), tf.s(1.2));
+    // Paw squashes flat for an instant when it slaps a key or clicks the mouse
+    let slap = if paw.mode == PawMode::PressingKey {
+        (1.0 - paw.total_lift() / 5.0).clamp(0.0, 1.0) * 0.6
+    } else if paw.mode == PawMode::OnMouse {
+        cat.mouse_press
+    } else {
+        0.0
+    };
+    let paw_pts = sample_ellipse(
+        tf.pt(tip[0], tip[1] + slap * 0.8),
+        tf.s(9.6 + slap * 1.1),
+        tf.s(8.8 - slap * 1.0),
+        22,
+    );
+    fill_smooth_polygon(painter, &paw_pts, st.paw);
+
+    if st.species == Species::Dino {
+        // Three little claws pointing wherever the arm is heading
+        let n = arm_pts.len();
+        let d = arm_pts[n - 1] - arm_pts[n - 3];
+        let heading = if d.length_sq() > 1e-4 { d.y.atan2(d.x) } else { std::f32::consts::FRAC_PI_2 };
+        for off in [-0.62_f32, 0.0, 0.62] {
+            let a = heading + off;
+            let dir = Vec2::new(a.cos(), a.sin());
+            let perp = Vec2::new(-dir.y, dir.x);
+            let base = tf.pt(tip[0], tip[1] + slap * 0.8) + dir * tf.s(7.2);
+            let claw = vec![
+                base - perp * tf.s(2.0),
+                base + dir * tf.s(5.4),
+                base + perp * tf.s(2.0),
+            ];
+            fill_smooth_polygon(painter, &claw, Color32::from_rgb(244, 238, 206));
+        }
+    }
+
+    // Light paws get a contour around the toes so they read over white keys and the mouse
+    if let Some(oc) = st.paw_outline {
+        let n = arm_pts.len();
+        let d = arm_pts[n - 1] - arm_pts[n - 3];
+        let heading = if d.length_sq() > 1e-4 { d.y.atan2(d.x) } else { std::f32::consts::FRAC_PI_2 };
+        let arc: Vec<Pos2> = (0..=14)
+            .map(|i| {
+                let a = heading + (i as f32 / 14.0 * 2.0 - 1.0) * 1.95;
+                tf.pt(
+                    tip[0] + a.cos() * (9.6 + slap * 1.1),
+                    tip[1] + slap * 0.8 + a.sin() * (8.8 - slap),
+                )
+            })
+            .collect();
+        painter.add(Shape::Path(PathShape::line(arc, Stroke::new(tf.s(1.3), oc))));
+    }
+
+    // Rim lines ONLY where the limb overlaps the torso (never floating in air!)
+    draw_arm_rim_highlights(painter, tf, cat, st, &arm_pts, w0, w1);
+
+    // Tucked paw: cute U-shaped contour under the paw resting on the chest
+    if curl > 0.04 {
+        let mut arc = Vec::with_capacity(14);
+        for i in 0..=12 {
+            let t = i as f32 / 12.0;
+            let ang = std::f32::consts::PI * (0.06 + t * 0.88);
+            arc.push(tf.pt(tip[0] + ang.cos() * 9.9, tip[1] + ang.sin() * 9.1));
+        }
+        painter.add(Shape::Path(PathShape::line(
+            arc,
+            Stroke::new(
+                tf.s(1.4),
+                with_alpha(st.rim, curl * 0.9),
+            ),
+        )));
+    }
 }
 
 fn draw_arm_rim_highlights(
     painter: &Painter,
     tf: &CanvasTransform,
     cat: &CatState,
+    st: &PetStyle,
     pts: &[Pos2],
-    half_w: f32,
-    stroke_w: f32,
+    w0: f32,
+    w1: f32,
 ) {
     if pts.len() < 4 {
         return;
     }
-    let rim_col = Color32::from_rgba_unmultiplied(212, 216, 210, 185);
-    let stroke = Stroke::new(stroke_w, rim_col);
+    let rim_stroke = Stroke::new(tf.s(1.25), with_alpha(st.rim, 0.78));
+    let n = pts.len();
+    let bx = 182.0 + cat.lean_x * 0.4;
+    let hc = cat.head_center();
+
+    // 1 = rim line over the torso, 2 = outer contour for light coats, 0 = nothing
+    let classify = |c: [f32; 2]| -> u8 {
+        // Strictly inside the torso so it separates limb from body cleanly, and off the
+        // upper chest so it starts mid-body like the reference
+        let inside_torso = ((c[0] - bx) / 45.0).powi(2) + ((c[1] - 188.0) / 47.0).powi(2) <= 1.0
+            && c[1] > 181.0
+            && c[1] < 229.0;
+        if inside_torso {
+            return 1;
+        }
+        if st.outline.is_some() {
+            let in_body = ((c[0] - bx) / 53.0).powi(2) + ((c[1] - 184.0) / 56.0).powi(2) <= 1.0;
+            let in_head = ((c[0] - hc[0]) / 45.0).powi(2) + ((c[1] - hc[1]) / 39.0).powi(2) <= 1.0;
+            if !in_body && !in_head {
+                return 2;
+            }
+        }
+        0
+    };
 
     for side_sign in [-1.0_f32, 1.0_f32] {
-        let mut seg = Vec::new();
-        for i in 1..(pts.len() - 2) {
-            let dir = (pts[i + 1] - pts[i - 1]).normalized();
-            let normal = Vec2::new(-dir.y, dir.x) * side_sign;
-            let edge_pt = pts[i] + normal * half_w;
-            let c_pt = tf.to_canvas(edge_pt);
-            // Keep highlight strictly inside torso bounds so it separates black-on-black cleanly
-            let bx = 182.0 + cat.lean_x * 0.4;
-            let inside_torso =
-                ((c_pt[0] - bx) / 46.0).powi(2) + ((c_pt[1] - 190.0) / 46.0).powi(2) <= 1.0
-                    && c_pt[1] > 165.0
-                    && c_pt[1] < 228.0;
-            if inside_torso {
-                seg.push(edge_pt);
-            } else if seg.len() >= 2 {
-                painter.add(Shape::Path(PathShape::line(std::mem::take(&mut seg), stroke)));
+        let mut seg: Vec<Pos2> = Vec::new();
+        let mut kind = 0u8;
+        let flush = |seg: &mut Vec<Pos2>, kind: u8| {
+            if seg.len() >= 2 {
+                let stroke = match (kind, st.outline) {
+                    (2, Some(oc)) => Stroke::new(tf.s(1.3), oc),
+                    _ => rim_stroke,
+                };
+                painter.add(Shape::Path(PathShape::line(std::mem::take(seg), stroke)));
             } else {
                 seg.clear();
             }
+        };
+        for i in 1..n {
+            let t = i as f32 / (n - 1) as f32;
+            let dir = (pts[(i + 1).min(n - 1)] - pts[i - 1]).normalized();
+            let normal = Vec2::new(-dir.y, dir.x) * side_sign;
+            let edge_pt = pts[i] + normal * tf.s(limb_half_width(t, w0, w1) + 0.2);
+            let k = classify(tf.to_canvas(edge_pt));
+            if k != kind {
+                flush(&mut seg, kind);
+                kind = k;
+            }
+            if k != 0 {
+                seg.push(edge_pt);
+            }
         }
-        if seg.len() >= 2 {
-            painter.add(Shape::Path(PathShape::line(seg, stroke)));
-        }
+        flush(&mut seg, kind);
     }
 }
 
@@ -979,19 +1846,85 @@ fn sample_ellipse(center: Pos2, rx: f32, ry: f32, steps: usize) -> Vec<Pos2> {
     pts
 }
 
-fn draw_thick_round_polyline(painter: &Painter, pts: &[Pos2], width: f32, color: Color32) {
+/// Draws a smooth limb whose thickness tapers from `w0` at the first point to `w1` at the last.
+fn draw_tapered_limb(painter: &Painter, pts: &[Pos2], w0: f32, w1: f32, color: Color32) {
     if pts.len() < 2 {
         return;
     }
-    let radius = width * 0.5;
-    painter.add(Shape::Path(PathShape::line(
-        pts.to_vec(),
-        Stroke::new(width, color),
-    )));
-    // Round caps and smooth joints
-    for &p in pts {
-        painter.circle_filled(p, radius, color);
+    draw_limb_range(painter, pts, w0, w1, 0, pts.len() - 1, color, true);
+}
+
+/// Draws the slice `i0..=i1` of a tapered limb (used for tail tips, rings and leg stripes).
+/// With `round` off the slice ends in straight cuts across the limb.
+#[allow(clippy::too_many_arguments)]
+fn draw_limb_range(
+    painter: &Painter,
+    pts: &[Pos2],
+    w0: f32,
+    w1: f32,
+    i0: usize,
+    i1: usize,
+    color: Color32,
+    round: bool,
+) {
+    let n = pts.len();
+    if n < 2 {
+        return;
     }
+    let i1 = i1.min(n - 1);
+    let radius = |i: usize| limb_half_width(i as f32 / (n - 1) as f32, w0, w1);
+    for i in i0..=i1 {
+        if round {
+            painter.circle_filled(pts[i], radius(i), color);
+        }
+        if i == i0 {
+            continue;
+        }
+        let d = pts[i] - pts[i - 1];
+        if d.length_sq() < 1e-4 {
+            continue;
+        }
+        let nrm = Vec2::new(-d.y, d.x).normalized();
+        let (r0, r1) = (radius(i - 1), radius(i));
+        painter.add(Shape::convex_polygon(
+            vec![
+                pts[i - 1] + nrm * r0,
+                pts[i] + nrm * r1,
+                pts[i] - nrm * r1,
+                pts[i - 1] - nrm * r0,
+            ],
+            color,
+            Stroke::NONE,
+        ));
+    }
+}
+
+/// Rounds the corners of a convex polygon given in canvas units.
+fn rounded_polygon(tf: &CanvasTransform, corners: &[[f32; 2]], radius: f32) -> Vec<Pos2> {
+    let n = corners.len();
+    let mut out = Vec::with_capacity(n * 6);
+    for i in 0..n {
+        let prev = corners[(i + n - 1) % n];
+        let cur = corners[i];
+        let next = corners[(i + 1) % n];
+        let toward = |p: [f32; 2]| -> [f32; 2] {
+            let (dx, dy) = (p[0] - cur[0], p[1] - cur[1]);
+            let len = (dx * dx + dy * dy).sqrt().max(0.001);
+            let r = radius.min(len * 0.45);
+            [cur[0] + dx / len * r, cur[1] + dy / len * r]
+        };
+        let a = toward(prev);
+        let b = toward(next);
+        for k in 0..=5 {
+            let t = k as f32 / 5.0;
+            let u = 1.0 - t;
+            out.push(tf.pt(
+                u * u * a[0] + 2.0 * u * t * cur[0] + t * t * b[0],
+                u * u * a[1] + 2.0 * u * t * cur[1] + t * t * b[1],
+            ));
+        }
+    }
+    out
 }
 
 fn fill_polygon_no_fringe(painter: &Painter, points: &[Pos2], color: Color32) {
@@ -1367,6 +2300,73 @@ mod visual_preview {
             cat4.update(0.016);
         }
         render_to_ppm(&cat4, &format!("{out_dir}/preview_04_gaming.ppm"));
+
+        // Optional frame strip of a key strike + mouse grab, to eyeball the motion
+        if std::env::var("GATIN_PREVIEW_SEQ").is_ok() {
+            let mut c = CatState::new();
+            c.update(0.016);
+            c.handle_event(InputEvent::KeyDown(KeyId::P));
+            for f in 0..24 {
+                if f == 6 {
+                    c.handle_event(InputEvent::KeyUp(KeyId::P));
+                    c.handle_event(InputEvent::KeyDown(KeyId::Q));
+                }
+                if f == 10 {
+                    c.handle_event(InputEvent::KeyUp(KeyId::Q));
+                }
+                if f == 14 {
+                    c.handle_event(InputEvent::MouseDelta { dx: 60.0, dy: -40.0 });
+                }
+                c.update(1.0 / 60.0);
+                render_to_ppm(&c, &format!("{out_dir}/seq_{f:02}.ppm"));
+            }
+        }
+
+        // One sheet per pet: idle, mouse + petting, typing, password
+        for kind in PetKind::ALL {
+            let name = format!("{kind:?}").to_lowercase();
+            let mut a = CatState::new();
+            a.pet = kind;
+            a.update(0.016);
+            render_to_ppm(&a, &format!("{out_dir}/pet_{name}_1.ppm"));
+
+            let mut b = CatState::new();
+            b.pet = kind;
+            b.handle_event(InputEvent::MouseMove {
+                norm_x: 0.25,
+                norm_y: 0.45,
+                screen_px: None,
+                look_dir: None,
+            });
+            b.handle_event(InputEvent::MouseDown(MouseButton::Right));
+            for _ in 0..30 {
+                b.register_demo_pet(-0.6);
+                b.update(0.016);
+            }
+            render_to_ppm(&b, &format!("{out_dir}/pet_{name}_2.ppm"));
+
+            let mut c = CatState::new();
+            c.pet = kind;
+            for key in [KeyId::Space, KeyId::F, KeyId::P] {
+                c.handle_event(InputEvent::KeyDown(key));
+                c.update(0.04);
+                c.handle_event(InputEvent::KeyUp(key));
+                c.update(0.04);
+            }
+            c.handle_event(InputEvent::KeyDown(KeyId::A));
+            for _ in 0..6 {
+                c.update(0.016);
+            }
+            render_to_ppm(&c, &format!("{out_dir}/pet_{name}_3.ppm"));
+
+            let mut d = CatState::new();
+            d.pet = kind;
+            d.set_password_mode(true);
+            for _ in 0..40 {
+                d.update(0.016);
+            }
+            render_to_ppm(&d, &format!("{out_dir}/pet_{name}_4.ppm"));
+        }
 
         // 5. Password field privacy mode: both paws covering eyes, zero keycaps shown!
         let mut cat5 = CatState::new();

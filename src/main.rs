@@ -6,13 +6,15 @@ mod config;
 mod demo;
 mod input;
 mod keyboard;
+mod pet;
 mod privacy;
 mod renderer;
 
 use crate::app::GatinApp;
 use crate::cat::{CANVAS_H, CANVAS_W};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, MAX_SCALE, MIN_SCALE};
 use crate::input::GlobalInput;
+use crate::pet::PetKind;
 use crate::privacy::PrivacyMonitor;
 use clap::Parser;
 use egui::{ViewportBuilder, WindowLevel};
@@ -21,7 +23,7 @@ use egui::{ViewportBuilder, WindowLevel};
 #[command(
     name = "gatin",
     version,
-    about = "Gatinho preto desktop pet em Rust (Linux, Windows e macOS)"
+    about = "Pet de desktop em Rust: gatos, cachorro e capivara que digitam com você (Linux, Windows e macOS)"
 )]
 struct Cli {
     /// Inicia no modo demo (digitação, mouse e carinho automáticos)
@@ -44,6 +46,10 @@ struct Cli {
     #[arg(long)]
     click_through: bool,
 
+    /// Escolhe o pet: black-cat, frajola, bengal, tricolor, siames, cachorro
+    #[arg(long, value_enum)]
+    pet: Option<PetKind>,
+
     /// Exibe logs de diagnóstico da detecção de campos de senha (AT-SPI2/UIA/Carbon)
     #[arg(long)]
     debug_privacy: bool,
@@ -54,7 +60,7 @@ fn main() -> eframe::Result<()> {
     let mut config = AppConfig::load();
 
     if let Some(scale) = cli.scale {
-        config.scale = scale.clamp(0.5, 2.5);
+        config.scale = scale.clamp(MIN_SCALE, MAX_SCALE);
     }
     if cli.no_keycaps {
         config.show_keycaps = false;
@@ -64,6 +70,9 @@ fn main() -> eframe::Result<()> {
     }
     if cli.click_through {
         config.click_through = true;
+    }
+    if let Some(pet) = cli.pet {
+        config.pet = pet;
     }
 
     let global_input = GlobalInput::start();
@@ -81,7 +90,8 @@ fn main() -> eframe::Result<()> {
         .with_app_id("gatin")
         .with_title("gatin")
         .with_inner_size([width, height])
-        .with_min_inner_size([CANVAS_W * 0.5, CANVAS_H * 0.5])
+        .with_min_inner_size([CANVAS_W * MIN_SCALE, CANVAS_H * MIN_SCALE])
+        .with_max_inner_size([CANVAS_W * MAX_SCALE, CANVAS_H * MAX_SCALE])
         .with_decorations(false)
         .with_transparent(true)
         .with_has_shadow(false)

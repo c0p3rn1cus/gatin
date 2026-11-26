@@ -1,11 +1,15 @@
+use crate::pet::PetKind;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const MIN_SCALE: f32 = 0.4;
+pub const MAX_SCALE: f32 = 3.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
-    /// Visual scale multiplier for the cat window (0.5 .. 2.5).
+    /// Visual scale multiplier for the cat window (MIN_SCALE .. MAX_SCALE).
     pub scale: f32,
     /// Keep the cat floating above all other windows.
     pub always_on_top: bool,
@@ -15,6 +19,8 @@ pub struct AppConfig {
     pub click_through: bool,
     /// Saved window outer position [x, y].
     pub window_pos: Option<[f32; 2]>,
+    /// Which pet is shown (black-cat, tuxedo, bengal, calico, siamese, dog).
+    pub pet: PetKind,
 }
 
 impl Default for AppConfig {
@@ -25,6 +31,7 @@ impl Default for AppConfig {
             show_keycaps: true,
             click_through: false,
             window_pos: None,
+            pet: PetKind::default(),
         }
     }
 }
@@ -40,7 +47,11 @@ impl AppConfig {
             return Self::default();
         };
         match std::fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => {
+                let mut cfg: Self = toml::from_str(&contents).unwrap_or_default();
+                cfg.scale = cfg.scale.clamp(MIN_SCALE, MAX_SCALE);
+                cfg
+            }
             Err(_) => Self::default(),
         }
     }

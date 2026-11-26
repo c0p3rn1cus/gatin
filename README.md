@@ -4,6 +4,7 @@ Um gatinho preto **desktop pet** escrito 100% em **Rust**, rodando de forma nati
 
 ## Funcionalidades
 
+- **Seis pets para escolher**: gato preto, frajola, bengal, tricolor, siamês e cachorro caramelo
 - **Janela flutuante transparente, sem bordas e sempre no topo** (`always-on-top`)
 - **Animação em tempo real do teclado e mouse**:
   - As patas articuladas batem exatamente nas teclas pressionadas no mini teclado mecânico 60% (com destaque em verde-limão nas teclas pressionadas e detalhes em laranja)
@@ -18,8 +19,9 @@ Um gatinho preto **desktop pet** escrito 100% em **Rust**, rodando de forma nati
   - **macOS**: usa `IsSecureEventInputEnabled` (`Carbon`).
 - **Interação**:
   - **Arrastar com botão esquerdo**: move o gatinho pela tela
-  - **Scroll do mouse**: redimensiona o gatinho (`50%` a `250%`)
-  - **Botão direito**: abre o menu (Sempre no topo, Teclas flutuantes, Modo Demo, Click-through, Tamanho, Sair)
+  - **Redimensionar (`40%` a `300%`)**: arraste as bordas/cantos (ou a alça no canto inferior direito), use o **scroll do mouse**, os atalhos `Ctrl +` / `Ctrl -` / `Ctrl 0` ou o slider no menu do botão direito
+  - **Trocar de pet**: passe o mouse sobre a janela e use as setas `‹ ›` ou as bolinhas no topo; também dá pelo menu do botão direito ou com `--pet`
+  - **Botão direito**: abre o menu (Pet, Sempre no topo, Teclas flutuantes, Modo Demo, Click-through, Tamanho, Sair)
 
 ## Download pronto (Windows, macOS e Linux)
 
@@ -47,6 +49,7 @@ Outras opções de linha de comando:
 
 ```bash
 gatin --scale 1.25       # tamanho inicial
+gatin --pet capivara     # black-cat, frajola, bengal, tricolor, siames, cachorro
 gatin --no-keycaps       # oculta as teclas flutuantes
 gatin --no-top           # desativa "sempre no topo"
 gatin --click-through    # cliques atravessam a janela
