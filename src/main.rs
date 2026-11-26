@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod cat;
 mod config;
 mod demo;
@@ -57,6 +58,7 @@ struct Cli {
 
 fn main() -> eframe::Result<()> {
     let cli = Cli::parse();
+    autostart::sync_broken_path();
     let mut config = AppConfig::load();
 
     if let Some(scale) = cli.scale {

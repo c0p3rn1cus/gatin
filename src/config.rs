@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub window_pos: Option<[f32; 2]>,
     /// Which pet is shown (black-cat, tuxedo, bengal, calico, siamese, dog).
     pub pet: PetKind,
+    /// Whether the first-run autostart prompt has already been answered.
+    pub autostart_prompted: bool,
 }
 
 impl Default for AppConfig {
@@ -32,6 +34,7 @@ impl Default for AppConfig {
             click_through: false,
             window_pos: None,
             pet: PetKind::default(),
+            autostart_prompted: false,
         }
     }
 }

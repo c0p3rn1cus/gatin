@@ -1,3 +1,4 @@
+use crate::autostart;
 use crate::cat::{CANVAS_H, CANVAS_W, CatState};
 use crate::config::{AppConfig, MAX_SCALE, MIN_SCALE};
 use crate::demo::DemoDriver;
@@ -33,6 +34,21 @@ pub struct GatinApp {
     picker_alpha: f32,
     /// Seconds the scale percentage badge stays visible after resizing.
     size_toast: f32,
+    /// Whether OS autostart is supported and currently enabled.
+    autostart_supported: bool,
+    autostart_enabled: bool,
+    /// Whether the first-run autostart card is currently visible.
+    show_autostart_prompt: bool,
+    /// Checkbox state inside the first-run card.
+    prompt_autostart_checked: bool,
+    /// Whether the user wants to copy the binary into a permanent per-user folder.
+    prompt_copy_permanent: bool,
+    /// Whether a permanent per-user install copy is available and not yet in use.
+    can_copy_permanent: bool,
+    /// Last autostart error message (shown in the card or context menu).
+    autostart_error: Option<String>,
+    /// Brief status banner shown at the bottom of the window after autostart changes.
+    status_toast: Option<(String, f32)>,
     /// Manual drag-resize fallback for platforms without OS drag_resize_window (macOS).
     #[cfg(target_os = "macos")]
     manual_resize_dir: Option<ResizeDirection>,
@@ -47,6 +63,9 @@ impl GatinApp {
     ) -> Self {
         let mut cat = CatState::new();
         cat.pet = config.pet;
+        let auto = autostart::inspect();
+        let show_autostart_prompt = auto.supported && !config.autostart_prompted && !auto.enabled;
+        let can_copy_permanent = auto.can_copy_to_permanent();
         Self {
             cat,
             input,
@@ -66,6 +85,14 @@ impl GatinApp {
             pet_toast: 3.5,
             picker_alpha: 0.0,
             size_toast: 0.0,
+            autostart_supported: auto.supported,
+            autostart_enabled: auto.enabled,
+            show_autostart_prompt,
+            prompt_autostart_checked: true,
+            prompt_copy_permanent: can_copy_permanent && auto.running_from_transient,
+            can_copy_permanent,
+            autostart_error: None,
+            status_toast: None,
             #[cfg(target_os = "macos")]
             manual_resize_dir: None,
         }
@@ -194,6 +221,128 @@ impl GatinApp {
         ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(
             self.config.click_through,
         ));
+    }
+
+    fn set_autostart(&mut self, enable: bool, copy_to_permanent: bool) -> bool {
+        let result = if enable {
+            autostart::enable(copy_to_permanent).map(|path| {
+                let copied = copy_to_permanent && self.can_copy_permanent;
+                let msg = if copied {
+                    "Copiado para pasta fixa e ativado!".to_string()
+                } else {
+                    "Inicialização automática ativada".to_string()
+                };
+                eprintln!("[gatin] Autostart ativado: {}", path.display());
+                msg
+            })
+        } else {
+            autostart::disable().map(|()| "Inicialização automática desativada".to_string())
+        };
+
+        match result {
+            Ok(msg) => {
+                self.autostart_enabled = enable;
+                self.autostart_error = None;
+                self.status_toast = Some((msg, 3.2));
+                true
+            }
+            Err(err) => {
+                self.autostart_error = Some(err);
+                false
+            }
+        }
+    }
+
+    fn render_autostart_prompt(&mut self, ctx: &Context, viewport_rect: Rect) {
+        let max_w = (viewport_rect.width() - 24.0).clamp(190.0, 290.0);
+        egui::Area::new(egui::Id::new("gatin_autostart_prompt"))
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 6.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(22, 22, 26, 242))
+                    .stroke(Stroke::new(
+                        1.2_f32,
+                        Color32::from_rgba_unmultiplied(206, 240, 74, 180),
+                    ))
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::same(14))
+                    .show(ui, |ui| {
+                        ui.set_width(max_w);
+                        ui.spacing_mut().item_spacing.y = 7.0;
+
+                        ui.label(
+                            egui::RichText::new("Iniciar com o sistema?")
+                                .strong()
+                                .size(14.0)
+                                .color(Color32::from_rgb(244, 244, 240)),
+                        );
+
+                        ui.checkbox(
+                            &mut self.prompt_autostart_checked,
+                            "Abrir o Gatin ao ligar o computador",
+                        );
+
+                        if self.prompt_autostart_checked && self.can_copy_permanent {
+                            ui.checkbox(
+                                &mut self.prompt_copy_permanent,
+                                "Copiar para pasta fixa",
+                            );
+                            if let Some(dest_label) = autostart::permanent_install_label() {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Salva uma cópia em {dest_label} para continuar funcionando mesmo se apagar de Downloads."
+                                    ))
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(175, 175, 182)),
+                                );
+                            }
+                        }
+
+                        if let Some(err) = &self.autostart_error {
+                            ui.label(
+                                egui::RichText::new(err)
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(245, 120, 105)),
+                            );
+                        }
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Agora não").clicked() {
+                                self.show_autostart_prompt = false;
+                                self.autostart_error = None;
+                                self.config.autostart_prompted = true;
+                                self.config.save();
+                            }
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let confirm = egui::Button::new(
+                                        egui::RichText::new("Confirmar")
+                                            .strong()
+                                            .color(Color32::from_rgb(22, 22, 26)),
+                                    )
+                                    .fill(Color32::from_rgb(206, 240, 74));
+
+                                    if ui.add(confirm).clicked() {
+                                        let ok = if self.prompt_autostart_checked {
+                                            self.set_autostart(true, self.prompt_copy_permanent)
+                                        } else {
+                                            true
+                                        };
+                                        if ok {
+                                            self.show_autostart_prompt = false;
+                                            self.config.autostart_prompted = true;
+                                            self.config.save();
+                                        }
+                                    }
+                                },
+                            );
+                        });
+                    });
+            });
     }
 }
 
@@ -335,12 +484,21 @@ impl eframe::App for GatinApp {
         // 4. Advance animation state
         self.cat.update(dt);
         self.size_toast = (self.size_toast - dt).max(0.0);
+        if let Some((_, rem)) = &mut self.status_toast {
+            *rem -= dt;
+            if *rem <= 0.0 {
+                self.status_toast = None;
+            }
+        }
 
         // 5. Render full-viewport transparent canvas
+        let mut viewport_rect = Rect::NOTHING;
         CentralPanel::default()
             .frame(Frame::NONE)
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
+                viewport_rect = rect;
+                let prompt_open = self.show_autostart_prompt;
                 let response = ui.allocate_rect(rect, Sense::click_and_drag());
                 let tf = CanvasTransform::from_rect(rect);
 
@@ -368,11 +526,12 @@ impl eframe::App for GatinApp {
                     self.last_window_size = Some(cur_size);
                 }
 
-                // Scroll wheel zooms smoothly anywhere over the window (unless a menu is open)
+                // Scroll wheel zooms smoothly anywhere over the window (unless a menu/prompt is open)
                 let pointer_inside = pointer_hover.is_some_and(|p| rect.contains(p));
                 if scroll_y.abs() > 1.0
                     && pointer_inside
                     && !self.config.click_through
+                    && !prompt_open
                     && !egui::Popup::is_any_open(ctx)
                 {
                     let target = self.config.scale + scroll_y * 0.002;
@@ -382,7 +541,7 @@ impl eframe::App for GatinApp {
                 // Border/corner resize hit-testing (avoid overlapping the top pet-picker buttons)
                 let top_avoid = (self.picker_alpha > 0.5)
                     .then(|| (tf.pt(96.0, 0.0).x, tf.pt(264.0, 0.0).x));
-                let hover_resize_dir = if !self.config.click_through {
+                let hover_resize_dir = if !self.config.click_through && !prompt_open {
                     response
                         .hover_pos()
                         .and_then(|p| resize_direction_at(rect, p, top_avoid))
@@ -391,7 +550,7 @@ impl eframe::App for GatinApp {
                 };
 
                 // Hovering over the cat -> track cursor with eyes; rubbing on the head pets the cat!
-                if let Some(hover_pos) = response.hover_pos() {
+                if !prompt_open && let Some(hover_pos) = response.hover_pos() {
                     let canvas_pt = tf.to_canvas(hover_pos);
                     let on_head = is_on_cat_head(&self.cat, canvas_pt);
                     let on_cat = on_head || is_on_cat_body(&self.cat, canvas_pt);
@@ -461,7 +620,7 @@ impl eframe::App for GatinApp {
                 }
 
                 // Drag edges/corners to resize, or drag the body to move the window
-                if response.drag_started_by(egui::PointerButton::Primary) {
+                if !prompt_open && response.drag_started_by(egui::PointerButton::Primary) {
                     let origin = press_origin.or_else(|| response.interact_pointer_pos());
                     let drag_resize = origin
                         .and_then(|p| resize_direction_at(rect, p, top_avoid))
@@ -518,6 +677,10 @@ impl eframe::App for GatinApp {
                 if self.size_toast > 0.0 {
                     let toast_alpha = (self.size_toast / 0.35).min(1.0);
                     draw_size_toast(ui.painter(), rect, self.config.scale, toast_alpha);
+                }
+                if let Some((msg, rem)) = &self.status_toast {
+                    let toast_alpha = (*rem / 0.45).min(1.0);
+                    draw_status_toast(ui.painter(), rect, msg, toast_alpha);
                 }
 
                 // Right-click context menu
@@ -581,6 +744,23 @@ impl eframe::App for GatinApp {
                         self.apply_window_flags(ctx);
                     }
 
+                    if self.autostart_supported {
+                        let mut enabled = self.autostart_enabled;
+                        if ui.checkbox(&mut enabled, "Iniciar com o sistema").changed() {
+                            let info = autostart::inspect();
+                            let copy = enabled
+                                && info.can_copy_to_permanent()
+                                && info.running_from_transient;
+                            self.set_autostart(enabled, copy);
+                        }
+                        if let Some(err) = &self.autostart_error {
+                            ui.small(
+                                egui::RichText::new(err)
+                                    .color(egui::Color32::from_rgb(245, 120, 105)),
+                            );
+                        }
+                    }
+
                     ui.separator();
                     let cur_pct = (self.config.scale * 100.0).round() as i32;
                     ui.label(format!("Tamanho ({cur_pct}%):"));
@@ -626,6 +806,10 @@ impl eframe::App for GatinApp {
                     }
                 });
             });
+
+        if self.show_autostart_prompt {
+            self.render_autostart_prompt(ctx, viewport_rect);
+        }
 
         // Debounced config persistence
         if self.config_dirty && self.last_save.elapsed() >= Duration::from_secs(1) {
@@ -762,6 +946,26 @@ fn draw_size_toast(painter: &egui::Painter, rect: Rect, scale: f32, alpha: f32) 
         Align2::CENTER_CENTER,
         format!("{}%", (scale * 100.0).round() as i32),
         FontId::proportional(11.5),
+        Color32::from_rgba_unmultiplied(206, 240, 74, a(255.0)),
+    );
+}
+
+/// Brief pill showing autostart confirmation near the bottom center.
+fn draw_status_toast(painter: &egui::Painter, rect: Rect, message: &str, alpha: f32) {
+    let a = |v: f32| (v * alpha).round().clamp(0.0, 255.0) as u8;
+    let width = (message.chars().count() as f32 * 6.5 + 24.0).clamp(140.0, rect.width() - 16.0);
+    let center = Pos2::new(rect.center().x, rect.bottom() - 18.0);
+    let pill = Rect::from_center_size(center, vec2(width, 22.0));
+    painter.rect_filled(
+        pill,
+        11.0,
+        Color32::from_rgba_unmultiplied(22, 22, 26, a(225.0)),
+    );
+    painter.text(
+        pill.center(),
+        Align2::CENTER_CENTER,
+        message,
+        FontId::proportional(11.0),
         Color32::from_rgba_unmultiplied(206, 240, 74, a(255.0)),
     );
 }

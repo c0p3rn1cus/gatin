@@ -21,7 +21,7 @@ Um gatinho preto **desktop pet** escrito 100% em **Rust**, rodando de forma nati
   - **Arrastar com botão esquerdo**: move o gatinho pela tela
   - **Redimensionar (`40%` a `300%`)**: arraste as bordas/cantos (ou a alça no canto inferior direito), use o **scroll do mouse**, os atalhos `Ctrl +` / `Ctrl -` / `Ctrl 0` ou o slider no menu do botão direito
   - **Trocar de pet**: passe o mouse sobre a janela e use as setas `‹ ›` ou as bolinhas no topo; também dá pelo menu do botão direito ou com `--pet`
-  - **Botão direito**: abre o menu (Pet, Sempre no topo, Teclas flutuantes, Modo Demo, Click-through, Tamanho, Sair)
+  - **Botão direito**: abre o menu (Pet, Sempre no topo, Teclas flutuantes, Modo Demo, Click-through, Iniciar com o sistema, Tamanho, Sair)
 
 ## Download pronto (Windows, macOS e Linux)
 
@@ -88,7 +88,7 @@ cargo build --release
 > **Nota sobre Windows Defender / SmartScreen:** como os binários das Releases ainda não possuem assinatura digital paga (*Code Signing*), o Windows pode exibir um aviso de editor desconhecido na primeira execução. O projeto é 100% open-source e compilado via GitHub Actions — se preferir, basta compilar localmente com `cargo build --release`.
 
 #### Iniciar automaticamente no Windows
-Pressione `Win + R`, digite `shell:startup`, dê Enter e coloque um **atalho** do `gatin.exe` nessa pasta (ou registre em `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`).
+Na primeira execução o próprio Gatin pergunta se você quer abrir junto com o sistema (e oferece copiar o `gatin.exe` para `%LOCALAPPDATA%\Programs\Gatin\gatin.exe` para continuar funcionando mesmo se você apagar a pasta de Downloads). Você também pode ligar ou desligar isso depois pelo menu do botão direito em **Iniciar com o sistema**.
 
 ### macOS (Apple Silicon & Intel)
 Usa `CoreGraphics` (`CGEventTap` em modo *listen-only*).
